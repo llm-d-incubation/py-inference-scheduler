@@ -13,13 +13,27 @@
 # limitations under the License.
 
 
-from scheduling.framework import ScorerPlugin, PickerPlugin, SchedulerProfile, WeightedScorer
-from scheduling.types import Endpoint, ScoredEndpoint, CycleState, LLMRequest
-from scheduling.plugins import SingleProfileHandler, LeastQueueScorer, WaitingQueueScorer, RunningQueueScorer, KVCacheScorer
-from scheduling.scheduler_config import SchedulerConfig
+from scheduling.framework import (
+    ScorerPlugin, 
+    PickerPlugin, 
+    SchedulerProfile, 
+    WeightedScorer,
+    Endpoint, 
+    ScoredEndpoint, 
+    CycleState, 
+    LLMRequest
+)
+from scheduling.plugins import (
+    SingleProfileHandler, 
+    LeastQueueScorer, 
+    WaitingQueueScorer, 
+    RunningQueueScorer, 
+    KVCacheScorer
+)
+from scheduling.core.config import SchedulerConfig
 from scheduling import PrefixCacheScorer, RoundRobinScorer
-from scheduling.prefix_plugin import _hash_prompt_bytes, _get_user_input_bytes
-from scheduling.scheduler import Scheduler
+from scheduling.plugins.scorers.prefix_plugin import _hash_prompt_bytes, _get_user_input_bytes
+from scheduling.core.scheduler import Scheduler
 from typing import Dict, Optional, Sequence
 import asyncio
 import random
@@ -78,7 +92,7 @@ class IGWRouter(RequestRouter):
             **kwargs,
         )
         # Initialize the RayRequestScheduler
-        self.scheduler = RayRequestScheduler()
+        self.scheduler = ReloadingScheduler()
 
     async def choose_replicas(
         self,
@@ -171,9 +185,9 @@ class IGWRouter(RequestRouter):
         print("on_request_routed callback is called")
 
 #defining an IGW-like scheduler
-from scheduling.ray_request_scheduler import RayRequestScheduler, MaxScorePicker
+from scheduling import ReloadingScheduler
 
-from backend.custom_engine import MetricsAwareLLMServer
+from datalayer.rayserve.engine import MetricsAwareLLMServer
 from ray.llm._internal.serve.core.ingress.builder import LLMServingArgs, make_fastapi_ingress
 from ray.llm._internal.serve.core.server.builder import build_llm_deployment
 
