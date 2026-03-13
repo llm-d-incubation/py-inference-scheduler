@@ -14,8 +14,15 @@
 
 from dataclasses import dataclass
 from typing import Dict, Any
-from .framework import ProfileHandler, SchedulerProfile, WeightedScorer
-from .registry import build_profile_handler, build_scorer, build_picker, build_filter
+from ..framework import (
+    ProfileHandler, 
+    SchedulerProfile, 
+    WeightedScorer,
+    build_profile_handler, 
+    build_scorer, 
+    build_picker, 
+    build_filter
+)
 
 
 @dataclass
