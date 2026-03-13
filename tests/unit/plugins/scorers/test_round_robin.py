@@ -14,8 +14,8 @@
 
 import pytest
 import concurrent.futures
-from scheduling.round_robin_plugin import RoundRobinScorer
-from scheduling.types import Endpoint, CycleState, LLMRequest
+from scheduling.plugins import RoundRobinScorer
+from scheduling.framework import Endpoint, CycleState, LLMRequest
 
 def test_round_robin_cycling():
     scorer = RoundRobinScorer()

@@ -12,19 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import os
-import sys
+
 import pytest
-
-# Ensure package path
-ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-if ROOT not in sys.path:
-    sys.path.insert(0, ROOT)
-
 from scheduling import SchedulerConfig, Scheduler
 from scheduling.plugins import SingleProfileHandler, SimpleFilter, ConstantScorer, QueueLengthScorer, MaxScorePicker
 from scheduling.framework import SchedulerProfile, WeightedScorer
-from scheduling.types import Endpoint, LLMRequest
+from scheduling.framework import Endpoint, LLMRequest
 
 class RandomPicker:
         def pick(self, cycle_state, request, scored_endpoints):

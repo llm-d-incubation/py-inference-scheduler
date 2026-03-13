@@ -12,8 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from scheduling.prefix_plugin import PrefixIndexer, _hash_prompt_bytes, PrefixCacheScorer
-from scheduling.types import Endpoint, CycleState, LLMRequest
+from scheduling.plugins.scorers.prefix_plugin import PrefixIndexer, _hash_prompt_bytes, PrefixCacheScorer
+from scheduling.framework import Endpoint, CycleState, LLMRequest
 
 
 def test_indexer_add_get_remove():

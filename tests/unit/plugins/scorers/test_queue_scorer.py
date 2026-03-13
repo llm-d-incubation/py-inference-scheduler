@@ -12,20 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import os
-import sys
 
-# Ensure package path
-ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-if ROOT not in sys.path:
-    sys.path.insert(0, ROOT)
-
-from scheduling.types import Endpoint, LLMRequest
+from scheduling.framework import Endpoint, LLMRequest
 from scheduling.framework import SchedulerProfile, WeightedScorer
 from scheduling.plugins import QueueLengthScorer, RandomPicker
 from scheduling.plugins import SingleProfileHandler
-from scheduling.scheduler_config import SchedulerConfig
-from scheduling.scheduler import Scheduler
+from scheduling.core.config import SchedulerConfig
+from scheduling.core.scheduler import Scheduler
 
 
 def make_scheduler_with_profile(profile: SchedulerProfile) -> Scheduler:

@@ -14,7 +14,7 @@
 
 import pytest
 from typing import Dict, Any
-from scheduling.types import Endpoint, LLMRequest, CycleState
+from scheduling.framework import Endpoint, LLMRequest, CycleState
 from scheduling.plugins import RunningQueueScorer
 
 class TestRunningQueueScorer:

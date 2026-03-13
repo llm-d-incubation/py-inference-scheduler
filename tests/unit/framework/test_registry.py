@@ -13,8 +13,8 @@
 # limitations under the License.
 
 import pytest
-from scheduling.scheduler_config import SchedulerConfig
-from scheduling.registry import _SCORERS, _PICKERS, _PROFILE_HANDLERS
+from scheduling.core.config import SchedulerConfig
+from scheduling.framework import _SCORERS, _PICKERS, _PROFILE_HANDLERS
 from scheduling.plugins import WaitingQueueScorer, MaxScorePicker, SingleProfileHandler
 import scheduling.plugins
 
