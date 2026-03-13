@@ -28,18 +28,18 @@ from verl.experimental.agent_loop.agent_loop import (
     AgentLoopManager
 )
 
-from scheduling.scheduler import Scheduler
-from scheduling.scheduler_config import SchedulerConfig
-from scheduling.types import LLMRequest, Endpoint
-from scheduling.inflight_store import InflightStore
+from scheduling.core.scheduler import Scheduler
+from scheduling.core.config import SchedulerConfig
+from scheduling.framework import LLMRequest, Endpoint, SchedulerProfile
+from datalayer.verl.metrics import verl_metrics_polling_loop
+from datalayer.verl.datastore import InflightStore
 from scheduling.plugins import (
     SimpleFilter,
     WaitingQueueScorer,
     MaxScorePicker,
     SingleProfileHandler
 )
-from scheduling.framework import SchedulerProfile
-from scheduling.ray_request_scheduler import RayRequestScheduler
+from scheduling import ReloadingScheduler
 
 logger = logging.getLogger(__name__)
 
@@ -50,7 +50,7 @@ class InferenceSchedulerServerManager(AsyncLLMServerManager):
     """
     def __init__(self, config: DictConfig, server_handles: list[ray.actor.ActorHandle], *args, **kwargs):
         super().__init__(config, server_handles, *args, **kwargs)
-        self.ray_request_scheduler = RayRequestScheduler()
+        self.ray_request_scheduler = ReloadingScheduler()
         self.inflight_store = InflightStore()
         self.endpoints = []
 
@@ -66,74 +66,6 @@ class InferenceSchedulerServerManager(AsyncLLMServerManager):
 
         self._metrics_task = None
 
-    async def poll_worker_metrics_loop(self):
-        """Asynchronously scrapes metrics to update endpoint queue sizes (50ms interval)"""
-        import os
-        import aiohttp
-
-        self._worker_urls = None
-
-        async with aiohttp.ClientSession() as session:
-            while True:
-                try:
-                    if self._worker_urls is None:
-                        discovered_urls = []
-                        for ep in self.endpoints:
-                            actor = ep.attributes["replica_obj"]
-                            try:
-                                ip, port = await actor.get_server_address.remote()
-                                discovered_urls.append(f"http://{ip}:{port}/metrics")
-                            except Exception as e:
-                                logger.error(f"Failed to fetch IP for {ep.name}: {e}")
-                                discovered_urls.append(None)
-                        self._worker_urls = discovered_urls
-                        logger.info(f"Natively mapped Worker Metrics IPs: {self._worker_urls}")
-
-                    # Map exactly to self._worker_urls index to pair with endpoints
-                    async def fetch_worker_metrics(session, idx, url):
-                        if url is None:
-                            return
-                        try:
-                            async with session.get(url, timeout=0.200) as response:
-                                text = await response.text()
-                                stats = {
-                                    "num_waiting_reqs": 0,
-                                    "num_running_reqs": 0,
-                                    "kv": 0.0,
-                                    "queue_len": 0
-                                }
-
-                                for line in text.split('\n'):
-                                    try:
-                                        if line.startswith("vllm:num_requests_waiting"):
-                                            stats["num_waiting_reqs"] = int(float(line.split(" ")[-1]))
-                                        elif line.startswith("vllm:num_requests_running"):
-                                            stats["num_running_reqs"] = int(float(line.split(" ")[-1]))
-                                        elif line.startswith("vllm:kv_cache_usage_perc"):
-                                            stats["kv"] = float(line.split(" ")[-1])
-                                    except IndexError:
-                                        continue
-
-                                endpoint = self.endpoints[idx]
-                                local_inflight = self.inflight_store.get(endpoint.name)
-                                stats["num_running_reqs"] = max(stats["num_running_reqs"], local_inflight)
-
-                                stats["queue_len"] = stats["num_waiting_reqs"] + stats["num_running_reqs"]
-                                endpoint.attributes["routing_stats"] = stats
-
-                        except asyncio.TimeoutError:
-                            logger.debug(f"Timeout connecting to {url}")
-                        except Exception as e:
-                            logger.error(f"Failed to scrape {url}: {e}")
-
-                    tasks = [fetch_worker_metrics(session, i, url) for i, url in enumerate(self._worker_urls)]
-                    await asyncio.gather(*tasks)
-
-                except Exception as e:
-                    logger.error(f"Metrics poll error: {e}")
-
-                # Poll at 50ms - same as gateway
-                await asyncio.sleep(0.05)
 
     async def generate(self, request_id: str, **kwargs):
         """Overrides Verl's native generate to forcefully yield to the metrics poller"""
@@ -158,6 +90,14 @@ class InferenceSchedulerServerManager(AsyncLLMServerManager):
         # vLLM requires a fresh request_id per generation to prevent KV cache collisions.
         kwargs["request_id"] = uuid.uuid4().hex
 
+        # vLLMAsyncServer ignores ignore_eos from config, so we must pass it explicitly.
+        sampling_params = kwargs.get("sampling_params", {})
+        if isinstance(sampling_params, dict):
+            sampling_params["ignore_eos"] = True
+            kwargs["sampling_params"] = sampling_params
+        elif hasattr(sampling_params, "ignore_eos"):
+             setattr(sampling_params, "ignore_eos", True)
+
         try:
             return await server.generate.remote(**kwargs)
         finally:
@@ -167,9 +107,8 @@ class InferenceSchedulerServerManager(AsyncLLMServerManager):
     def _choose_server(self, request_id: str, prompt_ids: List[int] = None) -> ray.actor.ActorHandle:
         """Overrides Verl's Native LRU Router"""
         if self._metrics_task is None:
-            self._metrics_task = asyncio.create_task(self.poll_worker_metrics_loop())
+            self._metrics_task = asyncio.create_task(verl_metrics_polling_loop(self.endpoints, self.inflight_store))
 
-        self.ray_request_scheduler._maybe_reload_config()
         req = LLMRequest(request_id=request_id, body=prompt_ids)
         selected_endpoints = self.ray_request_scheduler.run(req, candidates=self.endpoints)
 
