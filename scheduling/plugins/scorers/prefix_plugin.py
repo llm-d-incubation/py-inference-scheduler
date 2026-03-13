@@ -13,8 +13,7 @@
 # limitations under the License.
 
 from typing import Any, Dict, List, Optional, Sequence, Set, Mapping
-from scheduling.types import Endpoint, CycleState, LLMRequest
-from scheduling.registry import register_scorer
+from ...framework import Endpoint, CycleState, LLMRequest, register_scorer
 import hashlib
 import json
 from collections import OrderedDict 
@@ -160,6 +159,16 @@ class PrefixCacheScorer:
             scores[name] = float(scores[name]) / float(total)
 
         return scores
+
+    def pre_request(self, cycle_state: CycleState, request: LLMRequest, selected_endpoint: Endpoint) -> None:
+        hashes = cycle_state.get("prefix_hashes")
+        if hashes is not None:
+            self.add_prefixes_for_server(selected_endpoint.name, hashes)
+        else:
+            print("Warning: prefix_hashes not found in cycle_state in pre_request")
+            body_bytes = _get_user_input_bytes(request.body)
+            hashes = _hash_prompt_bytes(request.target_model, body_bytes or b"", self.block_size, self.max_prefix_blocks)
+            self.add_prefixes_for_server(selected_endpoint.name, hashes)
 
     # Helper to simulate the PreRequest behaviour in the upstream plugin.
     def add_prefixes_for_server(self, server_name: str, hashes: Sequence[int]) -> None:
