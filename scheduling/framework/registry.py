@@ -13,7 +13,7 @@
 # limitations under the License.
 
 from typing import Callable, Type, Dict, Any, TypeVar
-from scheduling.framework import ScorerPlugin, PickerPlugin, FilterPlugin, ProfileHandler
+from .interface import ScorerPlugin, PickerPlugin, FilterPlugin, ProfileHandler
 
 T = TypeVar("T")
 
