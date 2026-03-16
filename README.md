@@ -21,11 +21,11 @@ This example uses a simple implementation of prefix cache aware routing. This ex
 ### Steps
 
 1. CD into this repo `cd ./some-path/py-inference-scheduler`
-1. Create the scheduler configuration: `kubectl apply -f ./configs/scheduler-configmap.yaml`
+1. Create the scheduler configuration: `kubectl apply -f ./configs/scheduler_config.yaml`
 1. Create the Ray Cluster vis RayService CRD `kubectl apply -f ./configs/ray_service.yaml`. Wait for the resources to reach `Ready`
 1. Run `kubectl get svc`, copy the `ray-serve-llm-XXXXX-head-svc` service name.
 1. Create a new CLI window and run `kubectl port-forward ray-serve-llm-XXXXX-head-svc 8265:8265`. This is the dashboard port, which allow our Ray CLI to communicate with this ray cluster. You can now see the dashboard at http://localhost:8265.
-1. Run `ray job submit   --address="http://127.0.0.1:8265"   --working-dir="./" -- python ./ray_igw_router.py`. Which deploys our llm with our custom logic. Refer to the python file for more details.
+1. Run `ray job submit   --address="http://127.0.0.1:8265"   --working-dir="./" -- python ./integration/rayserve/router.py`. Which deploys our llm with our custom logic. Refer to the python file for more details.
 1. Go to the Serve tab of the dashboard, (it may take a few minutes for the deployment to stabilize) eventually should look something like: ![alt text](./images/dash.png)
 
 1. We need another CLI window to port forward to the service port: `kubectl port-forward svc/ray-serve-llm-XXXXX-head-svc 8000`
