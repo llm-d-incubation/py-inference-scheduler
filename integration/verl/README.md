@@ -17,7 +17,25 @@ If you have a `verl` instance and want to enable scheduling:
 
 Ensure you have both `verl` and `py-inference-scheduler` repositories available.
 
-### 2. Configure the Ray Cluster
+### 2. Configure Docker Registry
+
+The `RayCluster` example configuration (`examples/verl-inference-scheduler.yaml`) points to a placeholder image. You must build your own Docker image and host it in your own container registry to ensure reproducibility.
+
+1. **Build and push your image**: Build the `verl-ray` image using the provided Dockerfiles in the repository and push it to your own container registry (e.g., Docker Hub, AWS ECR, or your own GCP Artifact Registry).
+2. **Update the YAML configuration**: Open `examples/verl-inference-scheduler.yaml` and replace all occurrences of `us-central1-docker.pkg.dev/gke-shared-ai-dev/verl-grpo/verl-ray:latest` with your newly pushed image URL.
+3. **Configure Image Pull Secrets (Optional)**: If your registry is private, you need to [create a Kubernetes docker-registry secret](https://kubernetes.io/docs/tasks/configure-pod-container/pull-image-private-registry/#create-a-secret-by-providing-credentials-on-the-command-line) to allow nodes to pull the image. Ensure the `imagePullSecrets` configuration in the `verl-inference-scheduler.yaml` file points to the name of your new secret instead of the default `artifact-registry-secret`.
+
+Run the following command as an example to create a secret if you are using GCP Artifact Registry:
+
+```bash
+kubectl create secret docker-registry artifact-registry-secret \
+    --docker-server=us-central1-docker.pkg.dev \
+    --docker-username=oauth2accesstoken \
+    --docker-password=$(gcloud auth print-access-token) \
+    --dry-run=client -o yaml | kubectl apply -f -
+```
+
+### 3. Configure the Ray Cluster
 
 Use the provided example `RayCluster` configuration in `examples/` as a starting point. It specifically targets GKE A3 Ultra instances with H200 GPUs.
 
@@ -25,7 +43,7 @@ Use the provided example `RayCluster` configuration in `examples/` as a starting
 kubectl apply -f examples/verl-inference-scheduler.yaml
 ```
 
-### 3. Establish Head Node Connection
+### 4. Establish Head Node Connection
 
 Before you can submit a job, you must open a local tunnel to the Ray Head Node dashboard.
 
@@ -39,7 +57,7 @@ Before you can submit a job, you must open a local tunnel to the Ray Head Node d
     ```
 3.  **View the Dashboard**: Visit `http://localhost:8265` in your browser to monitor job progress and cluster health.
 
-### 4. Submission Configuration
+### 5. Submission Configuration
 
 To use the scheduler, you need to provide a `runtime-env.yaml` and a `scheduler.yaml` (`scheduler.yaml` and `configs/scheduler-configmap.yaml` are the same file - you modify these with your ideal scorer config) in your `verl` working directory.
 
@@ -59,7 +77,7 @@ py_modules:
   - "../py-inference-scheduler/scheduling"
 ```
 
-### 5. Hook Injection via Hydra Overrides
+### 6. Hook Injection via Hydra Overrides
 
 To activate the scheduler, use the `+actor_rollout_ref.rollout.agent.agent_loop_manager_class` Hydra override. Removing it would run the job with vERL's native scheduler.
 
@@ -89,7 +107,7 @@ ray job submit \
 - **`disable_log_stats=False`**: Required for vLLM to emit local metrics.
 - **`prometheus.enable=True`**: Required to expose the `/metrics` endpoint that the scheduler polls.
 
-### 6. View the results
+### 7. View the results
 
 This is a very small training loop for tetsing with 10 steps configured in the `trainer.total_training_steps=10` flag. Viewing the logs on the actual ray submit job where you've ran the training job is the best place for logs in my opinion. This can be found either in the *Overview* or *Jobs* tab of the Ray Dashboard. (localhost:8265). vERL gives us output by step, don't be concerned if you se `ppo` tags on the labels for the logs - vERL uses the same tetsing infrastructure for its GRPO and PPO runs. Our script is a GRPO trainer.
 
