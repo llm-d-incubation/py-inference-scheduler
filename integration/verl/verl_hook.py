@@ -39,7 +39,7 @@ from scheduling.plugins import (
     MaxScorePicker,
     SingleProfileHandler
 )
-from scheduling import ReloadingScheduler
+from scheduling import Scheduler
 
 logger = logging.getLogger(__name__)
 
@@ -50,7 +50,7 @@ class InferenceSchedulerServerManager(AsyncLLMServerManager):
     """
     def __init__(self, config: DictConfig, server_handles: list[ray.actor.ActorHandle], *args, **kwargs):
         super().__init__(config, server_handles, *args, **kwargs)
-        self.ray_request_scheduler = ReloadingScheduler()
+        self.ray_request_scheduler = Scheduler()
         self.inflight_store = InflightStore()
         self.endpoints = []
 

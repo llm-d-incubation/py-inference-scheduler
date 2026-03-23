@@ -92,7 +92,7 @@ class IGWRouter(RequestRouter):
             **kwargs,
         )
         # Initialize the RayRequestScheduler
-        self.scheduler = ReloadingScheduler()
+        self.scheduler = Scheduler()
 
     async def choose_replicas(
         self,
@@ -185,7 +185,7 @@ class IGWRouter(RequestRouter):
         print("on_request_routed callback is called")
 
 #defining an IGW-like scheduler
-from scheduling import ReloadingScheduler
+from scheduling import Scheduler
 
 from datalayer.rayserve.engine import MetricsAwareLLMServer
 from ray.llm._internal.serve.core.ingress.builder import LLMServingArgs, make_fastapi_ingress
