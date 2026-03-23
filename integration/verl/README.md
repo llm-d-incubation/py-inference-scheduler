@@ -22,8 +22,8 @@ Ensure you have both `verl` and `py-inference-scheduler` repositories available.
 The `RayCluster` example configuration (`examples/verl-inference-scheduler.yaml`) points to a placeholder image. You must build your own Docker image and host it in your own container registry to ensure reproducibility.
 
 1. **Build and push your image**: Build the `verl-ray` image using the provided Dockerfiles in the repository and push it to your own container registry (e.g., Docker Hub, AWS ECR, or your own GCP Artifact Registry).
-2. **Update the YAML configuration**: Open `examples/verl-inference-scheduler.yaml` and replace all occurrences of `us-central1-docker.pkg.dev/gke-shared-ai-dev/verl-grpo/verl-ray:latest` with your newly pushed image URL.
-3. **Configure Image Pull Secrets (Optional)**: If your registry is private, you need to [create a Kubernetes docker-registry secret](https://kubernetes.io/docs/tasks/configure-pod-container/pull-image-private-registry/#create-a-secret-by-providing-credentials-on-the-command-line) to allow nodes to pull the image. Ensure the `imagePullSecrets` configuration in the `verl-inference-scheduler.yaml` file points to the name of your new secret instead of the default `artifact-registry-secret`.
+1. **Update the YAML configuration**: Open `examples/verl-inference-scheduler.yaml` and replace all occurrences of `us-central1-docker.pkg.dev/gke-shared-ai-dev/verl-grpo/verl-ray:latest` with your newly pushed image URL.
+1. **Configure Image Pull Secrets (Optional)**: If your registry is private, you need to [create a Kubernetes docker-registry secret](https://kubernetes.io/docs/tasks/configure-pod-container/pull-image-private-registry/#create-a-secret-by-providing-credentials-on-the-command-line) to allow nodes to pull the image. Ensure the `imagePullSecrets` configuration in the `verl-inference-scheduler.yaml` file points to the name of your new secret instead of the default `artifact-registry-secret`.
 
 Run the following command as an example to create a secret if you are using GCP Artifact Registry:
 
@@ -51,11 +51,11 @@ Before you can submit a job, you must open a local tunnel to the Ray Head Node d
     ```bash
     kubectl port-forward svc/verl-inference-scheduler-head-svc 8265:8265 -n default &
     ```
-2.  **Export the Ray address** so the CLI knows where to target:
+1.  **Export the Ray address** so the CLI knows where to target:
     ```bash
     export RAY_ADDRESS="http://127.0.0.1:8265"
     ```
-3.  **View the Dashboard**: Visit `http://localhost:8265` in your browser to monitor job progress and cluster health.
+1.  **View the Dashboard**: Visit `http://localhost:8265` in your browser to monitor job progress and cluster health.
 
 ### 5. Submission Configuration
 
@@ -66,7 +66,7 @@ To use the scheduler, you need to provide a `runtime-env.yaml` and a `scheduler.
     cp ../py-inference-scheduler/integration/verl/examples/runtime-env.yaml .
     cp ../py-inference-scheduler/integration/verl/examples/scheduler.yaml .
     ```
-2.  **Adjust `py_modules` paths** in `runtime-env.yaml` to point to your local `py-inference-scheduler` installation.
+1.  **Adjust `py_modules` paths** in `runtime-env.yaml` to point to your local `py-inference-scheduler` installation.
 
 Example `runtime-env.yaml`:
 ```yaml
