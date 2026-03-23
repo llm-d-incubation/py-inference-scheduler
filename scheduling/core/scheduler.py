@@ -28,13 +28,40 @@ from .config import SchedulerConfig
 
 
 class Scheduler:
-    def __init__(self, config: SchedulerConfig) -> None:
-        self.profile_handler = config.profile_handler
-        self.profiles = config.profiles
+    def __init__(self, config_path: Optional[str] = None) -> None:
+        if config_path:
+            self.config_path = config_path
+        else:
+            self.config_path = os.environ.get("ROUTER_CONFIG_PATH")
+            if not self.config_path:
+                raise ValueError("ROUTER_CONFIG_PATH environment variable is missing and no config_path provided. Ensure the ConfigMap is mounted or path is passed.")
+
+        self.last_mtime = 0
+        self._maybe_reload_config()
 
     @classmethod
     def new_with_config(cls, config: SchedulerConfig) -> "Scheduler":
-        return cls(config)
+        instance = object.__new__(cls)
+        instance.config_path = None
+        instance.last_mtime = 0
+        instance.profile_handler = config.profile_handler
+        instance.profiles = config.profiles
+        return instance
+
+    def _maybe_reload_config(self):
+        if self.config_path is None:
+            return
+        mtime = os.path.getmtime(self.config_path)
+        if mtime > self.last_mtime:
+            print(f"Reloading scheduler config from {self.config_path}")
+            with open(self.config_path, "r") as f:
+                config_dict = yaml.safe_load(f)
+            if not isinstance(config_dict, dict):
+                raise ValueError("Parsed configuration is not a valid dictionary.")
+            config = SchedulerConfig.from_dict(config_dict)
+            self.profile_handler = config.profile_handler
+            self.profiles = config.profiles
+            self.last_mtime = mtime
 
     def schedule(self, request: LLMRequest, candidates: Sequence[Endpoint]) -> SchedulingResult:
         if not candidates:
@@ -47,7 +74,6 @@ class Scheduler:
         selected = self.profile_handler.pick(cycle_state, request, self.profiles, profile_results)
         assert selected is not None
 
-        
         for name, profile in selected.items():
             try:
                 res = profile.run(request, cycle_state, candidates)
@@ -57,7 +83,6 @@ class Scheduler:
                 print(repr(e))
                 profile_results[name] = None
 
-        
         primary = self.profile_handler.process_results(cycle_state, request, profile_results)
 
         # Build SchedulingResult
@@ -70,36 +95,9 @@ class Scheduler:
                     w.scorer.pre_request(cycle_state, request, selected_eps[0].endpoint)
         return result
 
-
-class ReloadingScheduler:
-    """ A wrapper around Scheduler that reloads configuration if the file changes.
-    """
-    def __init__(self, config_path: Optional[str] = None):
-        if config_path:
-            self.config_path = config_path
-        else:
-            self.config_path = os.environ.get("ROUTER_CONFIG_PATH")
-            if not self.config_path:
-                raise ValueError("ROUTER_CONFIG_PATH environment variable is missing and no config_path provided. Ensure the ConfigMap is mounted or path is passed.")
-
-        self.last_mtime = 0
-        self._maybe_reload_config()
-
-    def _maybe_reload_config(self):
-        mtime = os.path.getmtime(self.config_path)
-        if mtime > self.last_mtime:
-            print(f"Reloading scheduler config from {self.config_path}")
-            with open(self.config_path, "r") as f:
-                config_dict = yaml.safe_load(f)
-            if not isinstance(config_dict, dict):
-                raise ValueError("Parsed configuration is not a valid dictionary.")
-            self.config = SchedulerConfig.from_dict(config_dict)
-            self.scheduler = Scheduler.new_with_config(self.config)
-            self.last_mtime = mtime
-
     def run(self, request: LLMRequest, candidates: Sequence[Endpoint]) -> Sequence[ScoredEndpoint]:
         self._maybe_reload_config()
-        scheduler_output = self.scheduler.schedule(request, candidates)
+        scheduler_output = self.schedule(request, candidates)
         profile_name = scheduler_output.primary_profile_name
         profile_results = scheduler_output.profile_results.get(profile_name)
 
