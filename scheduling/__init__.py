@@ -20,7 +20,7 @@ scheduler. It is intentionally small and focuses on the same high-level
 concepts so it can be used for experimentation and unit testing in Python.
 """
 
-from .core.scheduler import Scheduler, ReloadingScheduler
+from .core.scheduler import Scheduler
 from .core.config import SchedulerConfig
 from .framework import (
     LLMRequest,
