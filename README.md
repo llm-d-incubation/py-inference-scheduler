@@ -65,3 +65,6 @@ curl \
 - Natively support sophisticated serving mechanisms such as Wide-EP with Wide-EP specific scheduling improvements
 - Multi-turn/Agentic RL specific optimizations
 - Experimentation with novel ideas to prove sampling efficiency improvements do not negatively impact model convergence
+
+---
+*Documentation updated*
