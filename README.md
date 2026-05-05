@@ -4,7 +4,7 @@ A Python implementation of an inference request scheduler, while the focus of th
 ***Note***: RL is an active area of research, much of our understanding may shift over time. Expect rapid updates as we explore optimizations  
 
 ## Roadmap/Dev Plan
-Current roadmap is here! Feel free to comment if you see other thigns as needed: https://docs.google.com/document/d/1qxL1CltVgBLcwTFocOF2D9q4yHszGdcDZb8ziLJ1o9Y/edit?tab=t.0#heading=h.ud7ptk6skqw
+Current roadmap is here! Feel free to comment if you see additional need: https://docs.google.com/document/d/1qxL1CltVgBLcwTFocOF2D9q4yHszGdcDZb8ziLJ1o9Y/edit?tab=t.0#heading=h.ud7ptk6skqw
 
 ## Ray Serve example
 This example uses a simple implementation of prefix cache aware routing. This example uses Ray Serve's custom routing: https://docs.ray.io/en/latest/serve/advanced-guides/custom-request-router.html. 
