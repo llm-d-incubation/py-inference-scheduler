@@ -261,4 +261,4 @@ Logs look as follows:
  - perf/throughput:2932.5070910595373
  ```
 
- Key metrics to look out for are ```perf/throughput``` for sampling throughput and ```timing_s/agent_loop/slowest/generate_sequences``` for your tail latency. Addtionally, if you enable preemptions, ```timing_s/agent_loop/slowest/num_preempted``` can be useful too. 
+ Key metrics to look out for are ```perf/throughput``` for sampling throughput and ```timing_s/agent_loop/slowest/generate_sequences``` for your tail latency. Additionally, if you enable preemptions, ```timing_s/agent_loop/slowest/num_preempted``` can be useful too. 
