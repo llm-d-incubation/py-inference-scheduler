@@ -92,7 +92,7 @@ class InferenceSchedulerServerManager(AsyncLLMServerManager):
         # -- we cannot interleave metric tasks in between of scheduled tasks
         # -- due to python being FIFO.
         # -- so we just make it part of the scheduling task instead of
-        # -- having an independant metric poller task.
+        # -- having an independent metric poller task.
         async with self._scheduling_lock:
             tasks = [fetch_worker_metrics(ep, self.inflight_store) for ep in self.endpoints]
             await asyncio.gather(*tasks)
