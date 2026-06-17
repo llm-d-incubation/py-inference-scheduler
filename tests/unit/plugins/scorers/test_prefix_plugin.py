@@ -39,6 +39,51 @@ def test_indexer_add_get_remove():
     assert idx.pods() == []
 
 
+def test_indexer_reset_clears_all_mappings():
+    idx = PrefixIndexer()
+    # Two servers share hash=2 so we exercise both maps and the shared-entry path.
+    idx.add([1, 2, 3], "s1")
+    idx.add([2, 3, 4], "s2")
+    assert set(idx.pods()) == {"s1", "s2"}
+    assert idx.get(2) == {"s1", "s2"}
+
+    idx.reset()
+
+    assert idx.pods() == []
+    for h in (1, 2, 3, 4):
+        assert idx.get(h) == set()
+
+    # After reset the indexer must still be usable.
+    idx.add([5], "s3")
+    assert idx.pods() == ["s3"]
+    assert idx.get(5) == {"s3"}
+
+
+def test_prefix_cache_scorer_reset_drops_routing_hints():
+    scorer = PrefixCacheScorer(block_size=4, max_prefix_blocks=10)
+    body = "abcdefghijkl"
+    req = LLMRequest(request_id="r1", target_model="m", headers={}, body=body)
+    hashes = _hash_prompt_bytes(req.target_model, body.encode("utf-8"), 4, 10)
+    assert len(hashes) >= 1
+    scorer.add_prefixes_for_server("ep1", hashes)
+
+    endpoints = {"ep1": Endpoint(name="ep1"), "ep2": Endpoint(name="ep2")}
+
+    # Pre-reset: ep1 has all the prefix hits, so it scores; ep2 does not.
+    pre_scores = scorer.score(CycleState(), req, endpoints)
+    assert "ep1" in pre_scores
+    assert pre_scores["ep1"] > 0.0
+
+    scorer.reset()
+
+    # Post-reset: no cached prefixes -> no endpoint scores against the prefix
+    # index. The "novel prompt" fallback then routes to the least-loaded
+    # servers; with both at zero load, both are tied.
+    post_scores = scorer.score(CycleState(), req, endpoints)
+    assert set(post_scores.keys()) == {"ep1", "ep2"}
+    assert scorer.indexer.pods() == []
+
+
 def test_hash_prompt_bytes_basic():
     body = "abcdefgh"
     # block size 4 -> two blocks

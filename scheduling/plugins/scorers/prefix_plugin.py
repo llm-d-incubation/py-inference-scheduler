@@ -67,6 +67,15 @@ class PrefixIndexer:
                 # drop empty entry
                 self._hash_to_servers.pop(h, None)
 
+    def reset(self) -> None:
+        """Drop every cached hash->server and server->hashes mapping.
+
+        Useful when an external event (e.g. a vLLM weight reload) clears the
+        engine-side prefix cache, making every stored routing hint stale.
+        """
+        self._hash_to_servers.clear()
+        self._server_to_hashes.clear()
+
     def pods(self) -> list[str]:
         return list(self._server_to_hashes.keys())
 
@@ -206,3 +215,12 @@ class PrefixCacheScorer:
 
     def remove_server(self, server_name: str) -> None:
         self.indexer.remove_server(server_name)
+
+    def reset(self) -> None:
+        """Drop all cached prefix->server mappings.
+
+        Useful when an external event (e.g. a vLLM weight reload) clears the
+        engine-side prefix cache, making every stored routing hint stale; the
+        scorer should start over rather than score against invalid hints.
+        """
+        self.indexer.reset()
