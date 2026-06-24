@@ -47,10 +47,23 @@ To debug effectively without making assumptions, you must understand how the int
 
 ---
 
-## 3. Pre-Flight Checklist
+## 3. Pre-Flight Checklist & API Stability
 
-Before deep-diving into logs, verify the environment meets these hard requirements:
-1.  **veRL Version**: Must be exactly `verl==0.7.1`.
+Before deep-diving into logs, verify the environment meets these requirements:
+
+1.  **veRL Version**: Recommended to be exactly `verl==0.7.1`.
+    *   **Why this strictness?** The integration relies on subclassing and monkey-patching veRL's *experimental* agent loop API (`verl.experimental.agent_loop`), which is highly unstable and underwent a major architectural rewrite between `v0.7.0` and `v0.7.1`.
+    *   **Key API Dependencies & Historical Context:**
+        *   **Worker Spawning:** `PyInferenceAgentLoopManager` ([verl_hook.py](../../../integration/verl/verl_hook.py)) overrides `self.agent_loop_workers_class` in `AgentLoopManager`. If veRL changes how it spawns workers or renames this property, the hook will fail to load.
+        *   **Manager Injection:** `PyInferenceAgentLoopWorker` injects `InferenceSchedulerServerManager` into `self.server_manager`. This relies on the parent `AgentLoopWorker` class using this exact property name to route requests.
+        *   **The 0.7.0 vs 0.7.1 Architectural Shift:**
+            *   *In v0.7.0 and earlier:* `AsyncLLMServerManager` managed its own local load balancing. Its `__init__` took `server_handles: list[ray.actor.ActorHandle]` (raw handles without IDs) and used a local method `_choose_server(request_id) -> ray.actor.ActorHandle` to route requests. There was no release/cleanup mechanism.
+            *   *In v0.7.1:* veRL introduced a global `GlobalRequestLoadBalancer` actor. `AsyncLLMServerManager.__init__` was rewritten to accept `servers: list[tuple[str, ray.actor.ActorHandle]]` (adding string IDs to handles) and a `load_balancer_handle`. Crucially, it introduced the `async def _acquire_server(request_id)` and `def _release_server(server_id)` hooks.
+            *   *Our Override:* We rely on the `v0.7.1` structure to intercept `_acquire_server` and `_release_server` to route requests through our native `Scheduler` and track inflight requests.
+    *   **How to adapt to other veRL versions (Porting Guide):** If you must use a different veRL version, you **must** inspect veRL's source code (specifically `verl/experimental/agent_loop/agent_loop.py`) to verify:
+        1. Whether it uses the `_choose_server` (<=0.7.0) or `_acquire_server` (>=0.7.1) paradigm.
+        2. Whether `servers` is passed as a list of raw handles or `(id, handle)` tuples.
+        You must then adapt the overrides in [verl_hook.py](../../../integration/verl/verl_hook.py) to match those exact signatures.
 2.  **Supported Images**: `verlai/verl:vllm011.latest` or `verlai/verl:sgl059.latest`.
 3.  **Shared Metrics Directory**: 
     - **K8s**: An `emptyDir` volume must be mounted at `/tmp/metrics` on **both** head and worker pods.
