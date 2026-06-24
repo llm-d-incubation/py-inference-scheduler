@@ -2,15 +2,15 @@
 name: verl-integration
 description: >-
   Self-healing guide to troubleshoot and fix issues encountered while integrating 
-  py-inference-scheduler with the veRL framework (v0.7.1) for GRPO training. 
+  py-inference-scheduler with the verl framework (v0.7.1) for GRPO training. 
   Use when pods fail, jobs hang, or metrics/routing are broken.
 ---
 
-# veRL Scheduler Integration Skill (Self-Healing Guide)
+# verl Scheduler Integration Skill (Self-Healing Guide)
 
-This skill provides the precise architectural context and diagnostic flows required to debug and self-heal the integration between `py-inference-scheduler` and `veRL`. 
+This skill provides the precise architectural context and diagnostic flows required to debug and self-heal the integration between `py-inference-scheduler` and `verl`. 
 
-Before debugging, always read the [veRL Integration README](../../../integration/verl/README.md) to understand the user's setup.
+Before debugging, always read the [verl Integration README](../../../integration/verl/README.md) to understand the user's setup.
 
 ---
 
@@ -29,14 +29,14 @@ Before executing any diagnostics, you **MUST** ask the user to clarify their set
 To debug effectively without making assumptions, you must understand how the integration is wired.
 
 ### 2.1 Control Flow (Scheduling & Routing)
-1.  **Entry Point**: veRL loads `PyInferenceAgentLoopManager` ([verl_hook.py](../../../integration/verl/verl_hook.py)), which overrides the worker actor class with `PyInferenceAgentLoopWorker`.
+1.  **Entry Point**: verl loads `PyInferenceAgentLoopManager` ([verl_hook.py](../../../integration/verl/verl_hook.py)), which overrides the worker actor class with `PyInferenceAgentLoopWorker`.
 2.  **Manager**: The worker spawns `InferenceSchedulerServerManager` which owns the `Scheduler` (engine) and the `InflightStore` (local queue tracker).
-3.  **Scheduling Loop**: When veRL requests a generation:
+3.  **Scheduling Loop**: When verl requests a generation:
     *   `_acquire_server()` is called. It acquires a lock to prevent concurrent scheduling during batching.
     *   It triggers `fetch_worker_metrics()` for all endpoints.
     *   It queries the `Scheduler` to select the best worker.
     *   It increments the `InflightStore` for the selected worker (to account for lag in Prometheus metrics).
-    *   It returns the selected Ray worker handle to veRL to execute the generation.
+    *   It returns the selected Ray worker handle to verl to execute the generation.
 4.  **Release**: Once generation completes, `_release_server()` decrements the `InflightStore`.
 
 ### 2.2 Data Flow (Metrics Collection)
@@ -51,16 +51,16 @@ To debug effectively without making assumptions, you must understand how the int
 
 Before deep-diving into logs, verify the environment meets these requirements:
 
-1.  **veRL Version**: Recommended to be exactly `verl==0.7.1`.
-    *   **Why this strictness?** The integration relies on subclassing and monkey-patching veRL's *experimental* agent loop API (`verl.experimental.agent_loop`), which is highly unstable and underwent a major architectural rewrite between `v0.7.0` and `v0.7.1`.
+1.  **verl Version**: Recommended to be exactly `verl==0.7.1`.
+    *   **Why this strictness?** The integration relies on subclassing and monkey-patching verl's *experimental* agent loop API (`verl.experimental.agent_loop`), which is highly unstable and underwent a major architectural rewrite between `v0.7.0` and `v0.7.1`.
     *   **Key API Dependencies & Historical Context:**
-        *   **Worker Spawning:** `PyInferenceAgentLoopManager` ([verl_hook.py](../../../integration/verl/verl_hook.py)) overrides `self.agent_loop_workers_class` in `AgentLoopManager`. If veRL changes how it spawns workers or renames this property, the hook will fail to load.
+        *   **Worker Spawning:** `PyInferenceAgentLoopManager` ([verl_hook.py](../../../integration/verl/verl_hook.py)) overrides `self.agent_loop_workers_class` in `AgentLoopManager`. If verl changes how it spawns workers or renames this property, the hook will fail to load.
         *   **Manager Injection:** `PyInferenceAgentLoopWorker` injects `InferenceSchedulerServerManager` into `self.server_manager`. This relies on the parent `AgentLoopWorker` class using this exact property name to route requests.
         *   **The 0.7.0 vs 0.7.1 Architectural Shift:**
             *   *In v0.7.0 and earlier:* `AsyncLLMServerManager` managed its own local load balancing. Its `__init__` took `server_handles: list[ray.actor.ActorHandle]` (raw handles without IDs) and used a local method `_choose_server(request_id) -> ray.actor.ActorHandle` to route requests. There was no release/cleanup mechanism.
-            *   *In v0.7.1:* veRL introduced a global `GlobalRequestLoadBalancer` actor. `AsyncLLMServerManager.__init__` was rewritten to accept `servers: list[tuple[str, ray.actor.ActorHandle]]` (adding string IDs to handles) and a `load_balancer_handle`. Crucially, it introduced the `async def _acquire_server(request_id)` and `def _release_server(server_id)` hooks.
+            *   *In v0.7.1:* verl introduced a global `GlobalRequestLoadBalancer` actor. `AsyncLLMServerManager.__init__` was rewritten to accept `servers: list[tuple[str, ray.actor.ActorHandle]]` (adding string IDs to handles) and a `load_balancer_handle`. Crucially, it introduced the `async def _acquire_server(request_id)` and `def _release_server(server_id)` hooks.
             *   *Our Override:* We rely on the `v0.7.1` structure to intercept `_acquire_server` and `_release_server` to route requests through our native `Scheduler` and track inflight requests.
-    *   **How to adapt to other veRL versions (Porting Guide):** If you must use a different veRL version, you **must** inspect veRL's source code (specifically `verl/experimental/agent_loop/agent_loop.py`) to verify:
+    *   **How to adapt to other verl versions (Porting Guide):** If you must use a different verl version, you **must** inspect verl's source code (specifically `verl/experimental/agent_loop/agent_loop.py`) to verify:
         1. Whether it uses the `_choose_server` (<=0.7.0) or `_acquire_server` (>=0.7.1) paradigm.
         2. Whether `servers` is passed as a list of raw handles or `(id, handle)` tuples.
         You must then adapt the overrides in [verl_hook.py](../../../integration/verl/verl_hook.py) to match those exact signatures.
