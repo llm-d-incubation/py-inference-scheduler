@@ -17,7 +17,7 @@ from __future__ import annotations
 import threading
 from typing import Mapping
 
-from scheduling.framework import (
+from py_inference_scheduler.framework import (
     CycleState,
     Endpoint,
     LLMRequest,

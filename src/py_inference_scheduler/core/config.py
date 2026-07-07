@@ -17,7 +17,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from scheduling.framework import (
+from py_inference_scheduler.framework import (
     ProfileHandler,
     SchedulerProfile,
     WeightedScorer,

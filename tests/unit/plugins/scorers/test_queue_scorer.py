@@ -13,10 +13,10 @@
 # limitations under the License.
 
 
-from scheduling.core.config import SchedulerConfig
-from scheduling.core.scheduler import Scheduler
-from scheduling.framework import Endpoint, LLMRequest, SchedulerProfile, WeightedScorer
-from scheduling.plugins import QueueLengthScorer, RandomPicker, SingleProfileHandler
+from py_inference_scheduler.core.config import SchedulerConfig
+from py_inference_scheduler.core.scheduler import Scheduler
+from py_inference_scheduler.framework import Endpoint, LLMRequest, SchedulerProfile, WeightedScorer
+from py_inference_scheduler.plugins import QueueLengthScorer, RandomPicker, SingleProfileHandler
 
 
 def make_scheduler_with_profile(profile: SchedulerProfile) -> Scheduler:

@@ -19,7 +19,7 @@ import json
 from collections import OrderedDict
 from typing import Mapping, Sequence, cast
 
-from scheduling.framework import CycleState, Endpoint, LLMRequest, register_scorer
+from py_inference_scheduler.framework import CycleState, Endpoint, LLMRequest, register_scorer
 
 
 class PrefixIndexer:

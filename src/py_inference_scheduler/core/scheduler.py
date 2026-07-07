@@ -20,8 +20,8 @@ from typing import Sequence
 
 import yaml
 
-from scheduling.core.config import SchedulerConfig
-from scheduling.framework import (
+from py_inference_scheduler.core.config import SchedulerConfig
+from py_inference_scheduler.framework import (
     CycleState,
     Endpoint,
     FlowControlPlugin,

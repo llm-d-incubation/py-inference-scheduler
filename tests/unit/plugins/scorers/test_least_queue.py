@@ -14,8 +14,8 @@
 
 import pytest
 
-from scheduling.framework import CycleState, Endpoint, LLMRequest
-from scheduling.plugins import LeastQueueScorer
+from py_inference_scheduler.framework import CycleState, Endpoint, LLMRequest
+from py_inference_scheduler.plugins import LeastQueueScorer
 
 
 class TestLeastQueueScorer:

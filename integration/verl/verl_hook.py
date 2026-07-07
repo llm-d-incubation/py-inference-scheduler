@@ -30,8 +30,8 @@ from backends.verl.sglang import SglangEnginePatch
 from backends.verl.vllm import VllmEnginePatch
 from datalayer.metrics.datastore import InflightStore
 from datalayer.metrics.verl.fetch_metrics import fetch_worker_metrics
-from scheduling import Scheduler
-from scheduling.framework import Endpoint, LLMRequest
+from py_inference_scheduler import Scheduler
+from py_inference_scheduler.framework import Endpoint, LLMRequest
 
 logger = logging.getLogger(__name__)
 

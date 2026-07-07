@@ -17,7 +17,7 @@ from __future__ import annotations
 import random
 from typing import Sequence
 
-from scheduling.framework import (
+from py_inference_scheduler.framework import (
     CycleState,
     LLMRequest,
     PickerPlugin,

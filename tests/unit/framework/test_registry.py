@@ -14,9 +14,9 @@
 
 import pytest
 
-from scheduling.core.config import SchedulerConfig
-from scheduling.framework import _PICKERS, _PROFILE_HANDLERS, _SCORERS
-from scheduling.plugins import MaxScorePicker, SingleProfileHandler, WaitingQueueScorer
+from py_inference_scheduler.core.config import SchedulerConfig
+from py_inference_scheduler.framework import _PICKERS, _PROFILE_HANDLERS, _SCORERS
+from py_inference_scheduler.plugins import MaxScorePicker, SingleProfileHandler, WaitingQueueScorer
 
 
 def test_registry_populated():

@@ -14,8 +14,8 @@
 
 import concurrent.futures
 
-from scheduling.framework import CycleState, Endpoint, LLMRequest
-from scheduling.plugins import RoundRobinScorer
+from py_inference_scheduler.framework import CycleState, Endpoint, LLMRequest
+from py_inference_scheduler.plugins import RoundRobinScorer
 
 
 def test_round_robin_cycling():

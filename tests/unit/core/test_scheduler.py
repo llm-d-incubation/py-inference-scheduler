@@ -15,9 +15,9 @@
 
 import pytest
 
-from scheduling import Scheduler, SchedulerConfig
-from scheduling.framework import Endpoint, LLMRequest, SchedulerProfile, WeightedScorer
-from scheduling.plugins import (
+from py_inference_scheduler import Scheduler, SchedulerConfig
+from py_inference_scheduler.framework import Endpoint, LLMRequest, SchedulerProfile, WeightedScorer
+from py_inference_scheduler.plugins import (
     ConstantScorer,
     MaxScorePicker,
     QueueLengthScorer,
