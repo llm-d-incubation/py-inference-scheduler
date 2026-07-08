@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from datalayer.metrics.prometheus import parse_sglang
+from py_inference_scheduler.datalayer.metrics.prometheus import parse_sglang
 
 _SGLANG_METRICS = (
     "# HELP sglang:num_running_reqs running\n"

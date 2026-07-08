@@ -14,7 +14,7 @@
 
 import logging
 
-from datalayer.metrics.verl.datastore import InflightStore
+from py_inference_scheduler.datalayer.metrics.datastore import InflightStore
 from py_inference_scheduler.framework import Endpoint
 
 logger = logging.getLogger(__name__)

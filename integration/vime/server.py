@@ -21,15 +21,15 @@ from urllib.parse import unquote
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse
 
-from datalayer.metrics.datastore import InflightStore
-from datalayer.metrics.vime.vllm import fetch_worker_metrics
 from integration.slime.server import (
     WorkerRegistry,
     lifespan,
     register_worker_routes,
     schedule_and_proxy,
 )
-from scheduling import Scheduler
+from py_inference_scheduler import Scheduler
+from py_inference_scheduler.datalayer.metrics.datastore import InflightStore
+from py_inference_scheduler.datalayer.metrics.vime.vllm import fetch_worker_metrics
 
 logger = logging.getLogger(__name__)
 

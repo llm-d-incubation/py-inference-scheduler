@@ -25,10 +25,10 @@ import aiohttp
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse
 
-from datalayer.metrics.datastore import InflightStore
-from datalayer.metrics.slime.sglang import fetch_worker_metrics
-from scheduling import Scheduler
-from scheduling.framework import Endpoint, LLMRequest
+from py_inference_scheduler import Scheduler
+from py_inference_scheduler.datalayer.metrics.datastore import InflightStore
+from py_inference_scheduler.datalayer.metrics.slime.sglang import fetch_worker_metrics
+from py_inference_scheduler.framework import Endpoint, LLMRequest
 
 logger = logging.getLogger(__name__)
 

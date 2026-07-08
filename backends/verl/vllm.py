@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 
-from datalayer.metrics.verl.vllm import get_vllm_routing_stats
+from py_inference_scheduler.datalayer.metrics.verl.vllm import get_vllm_routing_stats
 
 logger = logging.getLogger(__name__)
 

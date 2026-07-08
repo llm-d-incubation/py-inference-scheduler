@@ -14,7 +14,9 @@ class SglangEnginePatch:
                 SGLangHttpServer,
             )
 
-            from datalayer.metrics.verl.sglang import get_sglang_routing_stats
+            from py_inference_scheduler.datalayer.metrics.verl.sglang import (
+                get_sglang_routing_stats,
+            )
         except ImportError as e:
             logger.info(
                 "Skipping SGLang patch (normal on head node if SGLang is not installed): %s",

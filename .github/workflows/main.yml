@@ -10,9 +10,10 @@ jobs:
     steps:
     - uses: actions/checkout@v6.0.2
     - uses: actions/setup-python@v6.2.0
-    - uses: astral-sh/ruff-action@v4.0.0
+    - uses: astral-sh/ruff-action@v4.1.0
       with:
         args: check
+        version-file: "uv.lock"
 
   py-typecheck:
     runs-on: ubuntu-latest
@@ -25,7 +26,7 @@ jobs:
     - name: Install dependencies
       run: uv sync --all-groups
     - name: Run mypy
-      run: uv run mypy scheduling datalayer integration tests
+      run: uv run mypy src backends datalayer integration tests
 
   py-test:
     runs-on: ubuntu-latest

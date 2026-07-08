@@ -19,9 +19,9 @@ from typing import Any
 
 import aiohttp
 
-from datalayer.metrics.datastore import InflightStore
-from datalayer.metrics.prometheus import empty_sglang_stats, parse_sglang
-from scheduling.framework import Endpoint
+from py_inference_scheduler.datalayer.metrics.datastore import InflightStore
+from py_inference_scheduler.datalayer.metrics.prometheus import empty_sglang_stats, parse_sglang
+from py_inference_scheduler.framework import Endpoint
 
 logger = logging.getLogger(__name__)
 

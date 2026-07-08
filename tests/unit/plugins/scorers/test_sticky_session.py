@@ -16,8 +16,8 @@ from __future__ import annotations
 
 import pytest
 
-from scheduling.framework import CycleState, Endpoint, LLMRequest, build_scorer
-from scheduling.plugins import StickySessionScorer
+from py_inference_scheduler.framework import CycleState, Endpoint, LLMRequest, build_scorer
+from py_inference_scheduler.plugins import StickySessionScorer
 
 _HEADER_NAME = "x-sticky-session"
 

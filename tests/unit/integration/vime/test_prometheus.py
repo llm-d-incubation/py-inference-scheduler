@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from datalayer.metrics.prometheus import parse_vllm
+from py_inference_scheduler.datalayer.metrics.prometheus import parse_vllm
 
 # Metric names match vLLM v0.22.0 (vllm/v1/metrics/loggers.py).
 _VLLM_METRICS = (

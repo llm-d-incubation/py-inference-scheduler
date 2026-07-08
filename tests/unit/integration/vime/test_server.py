@@ -23,8 +23,8 @@ pytest.importorskip("httpx")  # FastAPI's TestClient is built on httpx
 from fastapi.testclient import TestClient
 
 from integration.vime.server import create_app
-from scheduling import Scheduler
-from scheduling.core.config import SchedulerConfig
+from py_inference_scheduler import Scheduler
+from py_inference_scheduler.core.config import SchedulerConfig
 
 _METRICS = (
     "# TYPE vllm:num_requests_running gauge\n"

@@ -22,8 +22,8 @@ pytest.importorskip("httpx")  # FastAPI's TestClient is built on httpx
 from fastapi.testclient import TestClient
 
 from integration.slime.server import create_app
-from scheduling import Scheduler
-from scheduling.core.config import SchedulerConfig
+from py_inference_scheduler import Scheduler
+from py_inference_scheduler.core.config import SchedulerConfig
 
 _METRICS = (
     "# TYPE sglang:num_running_reqs gauge\n"

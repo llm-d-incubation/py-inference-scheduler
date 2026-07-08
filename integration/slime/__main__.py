@@ -24,8 +24,8 @@ import yaml
 from fastapi import FastAPI
 
 from integration.slime.server import create_app
-from scheduling import Scheduler
-from scheduling.core.config import SchedulerConfig
+from py_inference_scheduler import Scheduler
+from py_inference_scheduler.core.config import SchedulerConfig
 
 _DEFAULT_CONFIG = "integration/slime/examples/scheduler.yaml"
 
