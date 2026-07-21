@@ -168,6 +168,7 @@ class PrefixCacheScorer:
             return dict.fromkeys(pods.keys(), 0.0)
 
         scores: dict[str, float] = {}
+        max_score = 0.0
         for h in hashes:
             servs = self.indexer.get(h)
             for name in servs:
@@ -177,15 +178,21 @@ class PrefixCacheScorer:
                     scores[name] = 1.0
                 else:
                     scores[name] += 1
+                    if scores[name] > max_score:
+                        max_score = scores[name]
+
 
         # If a novel prompt has no matching prefixes, route to the least-loaded servers.
-        if len(scores) == 0:
+        if len(scores) == 0 or max_score < (total/2):
+            for name in pods:
+                scores[name] = 0.0
             min_count = min(
                 len(self.indexer._server_to_hashes.get(name, {})) for name in pods
             )
             for name in pods:
                 if len(self.indexer._server_to_hashes.get(name, {})) == min_count:
                     scores[name] = 1.0
+            return scores
 
         for name, score in scores.items():
             scores[name] = float(score) / float(total)
