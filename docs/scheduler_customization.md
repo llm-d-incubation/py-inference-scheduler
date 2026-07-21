@@ -94,6 +94,7 @@ Scorers assign scores to replicas. Multiple scorers are normalized and weighted.
     *   `block_size` (int, default: `64`): Token block size for hashing.
     *   `max_prefix_blocks` (int, default: `256`): Max blocks to index.
     *   `lru_capacity_per_server` (int, default: `31250`): Cache capacity per replica.
+    *   `min_match_ratio` (float, default: `0.0`): Minimum fraction of prompt blocks the best replica must have cached for prefix scores to be used; below it, the request is treated as novel and routed to the least-loaded replicas. The default of `0` disables the threshold, so the least-loaded fallback only fires when no replica has any matching block.
 
 #### C. Generic Scorers (for benchmarking against current RL sampling routing)
 *   **`round_robin`**: Cycles through replicas sequentially.

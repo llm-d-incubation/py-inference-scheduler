@@ -15,16 +15,26 @@ spec:
         annotations:
           networking.gke.io/default-interface: eth0
       spec:
+        initContainers:
+        - name: data-downloader
+          image: google/cloud-sdk:slim
+          command: ["/bin/sh", "-c"]
+          args:
+            - "gcloud storage cp --recursive gs://<your-bucket-name>/data /home/ray/"
+          volumeMounts:
+          - mountPath: /home/ray/data
+            name: data
         containers:
         - name: ray-head
           image: verlai/verl:vllm011.latest
           imagePullPolicy: Always
-          env:
-          - name: WANDB_API_KEY
-            valueFrom:
-              secretKeyRef:
-                name: wandb-secret
-                key: api-token
+          # Optional, but reccommended; WANDB has a great UI
+          # env:
+          # - name: WANDB_API_KEY
+          #   valueFrom:
+          #     secretKeyRef:
+          #       name: wandb-secret
+          #       key: api-token
           ports:
           - containerPort: 6379
             name: gcs
@@ -70,6 +80,15 @@ spec:
       num-gpus: '8'
     template:
       spec:
+        initContainers:
+        - name: data-downloader
+          image: google/cloud-sdk:slim
+          command: ["/bin/sh", "-c"]
+          args:
+            - "gcloud storage cp --recursive gs://<your-bucket-name>/data /home/ray/"
+          volumeMounts:
+          - mountPath: /home/ray/data
+            name: data
         containers:
         - name: ray-worker
           image: verlai/verl:vllm011.latest
@@ -80,11 +99,11 @@ spec:
               secretKeyRef:
                 name: hf-secret
                 key: hf_api_token
-          - name: WANDB_API_KEY
-            valueFrom:
-              secretKeyRef:
-                name: wandb-secret
-                key: api-token
+          # - name: WANDB_API_KEY
+          #   valueFrom:
+          #     secretKeyRef:
+          #       name: wandb-secret
+          #       key: api-token
           - name: LD_LIBRARY_PATH
             value: /usr/local/nvidia/lib64
           resources:
@@ -130,3 +149,7 @@ spec:
             name: scheduler-config
         - name: data
           emptyDir: {}
+        metadata:
+        annotations:
+          networking.gke.io/default-interface: eth0
+          networking.gke.io/interfaces: "[\n  {\"interfaceName\":\"eth0\",\"network\"\n            :\"default\"},\n  {\"interfaceName\":\"eth1\",\"network\":\"gvnic-1\"\n            },\n  {\"interfaceName\":\"eth2\",\"network\":\"rdma-0\"},\n  {\"interfaceName\"\n            :\"eth3\",\"network\":\"rdma-1\"},\n  {\"interfaceName\":\"eth4\",\"network\"\n            :\"rdma-2\"},\n  {\"interfaceName\":\"eth5\",\"network\":\"rdma-3\"},\n  {\"interfaceName\":\"eth6\",\"network\":\"rdma-4\"},\n  {\"interfaceName\"\n            :\"eth7\",\"network\":\"rdma-5\"},\n  {\"interfaceName\":\"eth8\",\"network\"\n            :\"rdma-6\"},\n  {\"interfaceName\":\"eth9\",\"network\":\"rdma-7\"}\n            ]\n"

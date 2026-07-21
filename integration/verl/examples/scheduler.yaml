@@ -3,6 +3,13 @@ profile_handler:
 profiles:
   backpressure:
     scorers:
+      # These scorers are just an example, and can(and very much should) be tuned to your workload.
+      - type: waiting_queue
+        weight: 5.0
+      - type: least_queue
+        weight: 2.0
+      - type: kv_cache
+        weight: 1.0
       - type: prefix_cache
         weight: 1.0
     picker:

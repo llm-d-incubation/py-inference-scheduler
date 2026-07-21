@@ -12,11 +12,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import pathlib
+import textwrap
+
 import pytest
 
 from py_inference_scheduler.core.config import SchedulerConfig
+from py_inference_scheduler.core.scheduler import Scheduler
 from py_inference_scheduler.framework import _PICKERS, _PROFILE_HANDLERS, _SCORERS
-from py_inference_scheduler.plugins import MaxScorePicker, SingleProfileHandler, WaitingQueueScorer
+from py_inference_scheduler.plugins import (
+    MaxScorePicker,
+    PrefixCacheScorer,
+    SingleProfileHandler,
+    WaitingQueueScorer,
+)
 
 
 def test_registry_populated():
@@ -60,6 +69,48 @@ def test_scheduler_config_from_dict():
 
     assert isinstance(profile.picker, MaxScorePicker)
     assert profile.picker.max_num == 3
+
+
+def test_prefix_cache_config_propagates_from_yaml_file(tmp_path: pathlib.Path):
+    """End-to-end config propagation for the prefix_cache scorer.
+
+    Mirrors the production path: the Scheduler reads the mounted scheduler.yaml
+    (the inner document of the ConfigMap, not the manifest wrapper) with
+    yaml.safe_load, and SchedulerConfig.from_dict pops type/weight and passes
+    every remaining key straight into the registered scorer's constructor.
+    """
+    scheduler_yaml = textwrap.dedent(
+        """
+        profile_handler:
+          type: single_profile
+        profiles:
+          default:
+            scorers:
+              - type: prefix_cache
+                weight: 10.0
+                block_size: 8
+                max_prefix_blocks: 32
+                lru_capacity_per_server: 123
+                min_match_ratio: 0.25
+            picker:
+              type: max_score
+        """
+    )
+    config_file = tmp_path / "scheduler.yaml"
+    config_file.write_text(scheduler_yaml, encoding="utf-8")
+
+    scheduler = Scheduler(config_path=str(config_file))
+    scheduler._maybe_reload_config()
+
+    weighted = scheduler.profiles["default"].scorers[0]
+    assert weighted.weight == 10.0
+
+    scorer = weighted.scorer
+    assert isinstance(scorer, PrefixCacheScorer)
+    assert scorer.block_size == 8
+    assert scorer.max_prefix_blocks == 32
+    assert scorer.min_match_ratio == 0.25
+    assert scorer.indexer._lru_capacity_per_server == 123
 
 
 def test_scheduler_config_invalid_type():

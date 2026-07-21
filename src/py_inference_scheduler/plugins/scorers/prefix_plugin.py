@@ -142,9 +142,14 @@ class PrefixCacheScorer:
         block_size: int = 64,
         max_prefix_blocks: int = 256,
         lru_capacity_per_server: int = 31250,
+        min_match_ratio: float = 0.0,
     ) -> None:
         self.block_size = block_size
         self.max_prefix_blocks = max_prefix_blocks
+        # Minimum fraction of the prompt's blocks the best endpoint must have
+        # cached for prefix affinity to apply; below it the prompt is treated
+        # as novel and routed to the least-loaded servers.
+        self.min_match_ratio = min_match_ratio
         self.indexer = PrefixIndexer(lru_capacity_per_server=lru_capacity_per_server)
 
     def score(
@@ -178,12 +183,10 @@ class PrefixCacheScorer:
                     scores[name] = 1.0
                 else:
                     scores[name] += 1
-                    if scores[name] > max_score:
-                        max_score = scores[name]
-
+                    max_score = max(max_score, scores[name])
 
         # If a novel prompt has no matching prefixes, route to the least-loaded servers.
-        if len(scores) == 0 or max_score < (total/2):
+        if len(scores) == 0 or max_score < (total * self.min_match_ratio):
             for name in pods:
                 scores[name] = 0.0
             min_count = min(
