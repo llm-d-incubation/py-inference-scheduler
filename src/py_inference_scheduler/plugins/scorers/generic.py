@@ -43,8 +43,9 @@ class ConstantScorer(ScorerPlugin):
 class RoundRobinScorer(ScorerPlugin):
     """A scorer that cycles through endpoints in a round-robin fashion."""
 
-    def __init__(self) -> None:
-        self._counter = 0
+    def __init__(self, worker_index: int = 0, stride: int = 1) -> None:
+        self._counter = worker_index
+        self._stride = max(1, stride)
         self._lock = threading.Lock()
 
     def score(
@@ -56,7 +57,7 @@ class RoundRobinScorer(ScorerPlugin):
         names = sorted(pods.keys(), key=str)
         with self._lock:
             idx = self._counter % len(names)
-            self._counter += 1
+            self._counter += self._stride
         selected_name = names[idx]
 
         return {selected_name: 1.0}
