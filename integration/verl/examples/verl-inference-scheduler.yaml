@@ -28,7 +28,7 @@ spec:
         - name: ray-head
           image: verlai/verl:vllm011.latest
           imagePullPolicy: Always
-          # Optional, but reccommended; WANDB has a great UI
+          # Optional, but recommended; WANDB has a great UI
           # env:
           # - name: WANDB_API_KEY
           #   valueFrom:
