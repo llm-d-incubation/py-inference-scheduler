@@ -15,12 +15,17 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import random
 import uuid
+from collections import OrderedDict
 from typing import Callable, Sequence
 
 from ray import serve
 from ray.actor import ActorHandle
+from ray.llm._internal.serve.core.configs.openai_api_models import (  # noqa: PLC2701
+    to_model_metadata,
+)
 from ray.llm._internal.serve.core.ingress.builder import (  # noqa: PLC2701
     LLMServingArgs,
     make_fastapi_ingress,
@@ -41,7 +46,21 @@ from ray.serve.request_router import (
 )
 
 from py_inference_scheduler.core.scheduler import Scheduler
+from py_inference_scheduler.datalayer.connectors.mooncake.kv import (
+    mooncake_enabled,
+    mooncake_engine_kwargs,
+    mooncake_env_vars,
+)
 from py_inference_scheduler.datalayer.rayserve.engine import MetricsAwareLLMServer
+from py_inference_scheduler.datalayer.rayserve.relocation import (
+    ENABLE_ENV as ENABLE_RELOCATION_ENV,
+)
+from py_inference_scheduler.datalayer.rayserve.relocation import (
+    PULL_OF_HEADER,
+    TARGET_HEADER,
+    RelocatingIngress,
+    relocation_enabled,
+)
 from py_inference_scheduler.framework import (
     Endpoint,
     FlowControlPlugin,
@@ -179,6 +198,11 @@ class IGWRouter(RequestRouter):
         self.deployment_name = deployment_id.name
         self.fc_manager = FlowControlManager(self)
         self._loop: asyncio.AbstractEventLoop | None = None
+        self._relocation_on = relocation_enabled()
+        self._request_replica: OrderedDict[str, str] = OrderedDict()
+        self._request_replica_cap = int(
+            os.environ.get("MOONCAKE_RELOCATION_REGISTRY_CAP", "4096")
+        )
 
     async def _get_routing_stats(
         self, replicas: list[RunningReplica], pending_request: PendingRequest
@@ -243,9 +267,34 @@ class IGWRouter(RequestRouter):
 
         target_model = getattr(request_args, "model", self.deployment_name)
 
-        return LLMRequest(request_id=req_id, body=body, target_model=target_model)
+        headers: dict[str, str] = {}
+        if len(pending_request.args) > 1 and pending_request.args[1] is not None:
+            headers = dict(getattr(pending_request.args[1], "headers", {}) or {})
 
-    async def choose_replicas(
+        return LLMRequest(
+            request_id=req_id, body=body, target_model=target_model, headers=headers
+        )
+
+    def _apply_relocation_headers(
+        self, headers: dict[str, str], candidate_replicas: list[RunningReplica]
+    ) -> tuple[RunningReplica | None, list[RunningReplica]]:
+        """Returns (target replica or None, remaining candidates)."""
+        if not self._relocation_on:
+            return None, candidate_replicas
+        # A pull must never land back on the replica it was pushed out of
+        pushed_from = self._request_replica.get(headers.get(PULL_OF_HEADER, ""))
+        if pushed_from and len(candidate_replicas) > 1:
+            candidate_replicas = [
+                r for r in candidate_replicas if str(r.replica_id) != pushed_from
+            ]
+        target_name = headers.get(TARGET_HEADER)
+        if target_name:
+            for replica in candidate_replicas:
+                if str(replica.replica_id) == target_name:
+                    return replica, candidate_replicas
+        return None, candidate_replicas
+
+    async def choose_replicas(  # noqa: PLR0911, PLR0912
         self,
         candidate_replicas: list[RunningReplica],
         pending_request: PendingRequest | None = None,
@@ -261,6 +310,12 @@ class IGWRouter(RequestRouter):
         # for health check empty requests
         if not pending_request or not pending_request.args or not llm_req.body:
             return self._fallback_random_choice(candidate_replicas)
+
+        target_replica, candidate_replicas = self._apply_relocation_headers(
+            llm_req.headers or {}, candidate_replicas
+        )
+        if target_replica:
+            return [[target_replica]]
 
         try:
             endpoints: Sequence[Endpoint] = await self.build_endpoints(
@@ -322,6 +377,14 @@ class IGWRouter(RequestRouter):
         llm_req = self._parse_to_llm_request(pending_request)
         is_streaming = pending_request.metadata.is_streaming
 
+        # Key=x-request-id since push and pull share the same Serve request_id
+        if self._relocation_on:
+            ingress_request_id = (llm_req.headers or {}).get("x-request-id")
+            if ingress_request_id:
+                self._request_replica[ingress_request_id] = str(replica_id)
+                if len(self._request_replica) > self._request_replica_cap:
+                    self._request_replica.popitem(last=False)
+
         if self.scheduler.has_flow_control():
             result.add_done_callback(lambda _: self.fc_manager.release(llm_req, str(replica_id)))
             self.fc_manager.attach_learning_callback(llm_req, result, is_streaming)
@@ -329,15 +392,40 @@ class IGWRouter(RequestRouter):
 
 # Hooking into Ray Serve's Request Router
 
+engine_kwargs: dict[str, object] = {
+    "enable_prefix_caching": True,
+    "tensor_parallel_size": 2,
+}
+env_vars: dict[str, str] = {
+    "NCCL_NET_PLUGIN": "/usr/local/gib/lib64/libnccl-net_internal.so",
+    "NCCL_CROSS_NIC": "0",
+    "NCCL_NET_GDR_LEVEL": "PIX",
+    "NCCL_P2P_NET_CHUNKSIZE": "131072",
+    "NCCL_NVLS_CHUNKSIZE": "524288",
+    "NCCL_IB_ADAPTIVE_ROUTING": "1",
+    "NCCL_IB_QPS_PER_CONNECTION": "4",
+    "NCCL_IB_TC": "52",
+    "NCCL_IB_FIFO_TC": "84",
+    "NCCL_TUNER_CONFIG_PATH": "/usr/local/gib/configs/tuner_config_a3u.txtpb",
+}
+
+# Opt-in Mooncake shared KV tier (set ENABLE_MOONCAKE_KV=1). Off by default so
+# the normal deployment is unchanged; when on, every replica pushes/pulls KV to a
+# cluster-wide Mooncake Store and saves decode KV via DecodeKVSavingConnector.
+if mooncake_enabled():
+    engine_kwargs.update(mooncake_engine_kwargs())
+    env_vars.update(mooncake_env_vars())
+
+# Pass through to engine side.
+if ENABLE_RELOCATION_ENV in os.environ:
+    env_vars[ENABLE_RELOCATION_ENV] = os.environ[ENABLE_RELOCATION_ENV]
+
 llm_config = LLMConfig(
     model_loading_config={
         "model_id": "qwen-32b",
         "model_source": "Qwen/Qwen2.5-32B-Instruct",
     },
-    engine_kwargs={
-        "enable_prefix_caching": True,
-        "tensor_parallel_size": 2,
-    },
+    engine_kwargs=engine_kwargs,
     deployment_config={
         "autoscaling_config": {
             "min_replicas": 1,
@@ -349,20 +437,7 @@ llm_config = LLMConfig(
         },
         "ray_actor_options": {"num_cpus": 1},
     },
-    runtime_env={
-        "env_vars": {
-            "NCCL_NET_PLUGIN": "/usr/local/gib/lib64/libnccl-net_internal.so",
-            "NCCL_CROSS_NIC": "0",
-            "NCCL_NET_GDR_LEVEL": "PIX",
-            "NCCL_P2P_NET_CHUNKSIZE": "131072",
-            "NCCL_NVLS_CHUNKSIZE": "524288",
-            "NCCL_IB_ADAPTIVE_ROUTING": "1",
-            "NCCL_IB_QPS_PER_CONNECTION": "4",
-            "NCCL_IB_TC": "52",
-            "NCCL_IB_FIFO_TC": "84",
-            "NCCL_TUNER_CONFIG_PATH": "/usr/local/gib/configs/tuner_config_a3u.txtpb",
-        }
-    },
+    runtime_env={"env_vars": env_vars},
 )
 
 
@@ -371,18 +446,33 @@ def build_custom_openai_app(builder_config: dict[str, object]) -> object:
     builder_args = LLMServingArgs.model_validate(builder_config)
     llm_configs = builder_args.llm_configs
 
-    llm_deployments = [
-        build_llm_deployment(c, deployment_cls=MetricsAwareLLMServer) for c in llm_configs
-    ]
+    llm_deployments = {
+        c.model_id: build_llm_deployment(c, deployment_cls=MetricsAwareLLMServer)
+        for c in llm_configs
+    }
+    model_cards = {c.model_id: to_model_metadata(c.model_id, c) for c in llm_configs}
+    lora_paths = {
+        c.model_id: c.lora_config.dynamic_lora_loading_path
+        for c in llm_configs
+        if c.lora_config is not None
+    }
 
     ingress_cls_config = builder_args.ingress_cls_config
-    ingress_options = ingress_cls_config.ingress_cls.get_deployment_options(llm_configs)
-    ingress_cls = make_fastapi_ingress(ingress_cls_config.ingress_cls)
+    base_ingress_cls = (
+        RelocatingIngress if relocation_enabled() else ingress_cls_config.ingress_cls
+    )
+    ingress_options = base_ingress_cls.get_deployment_options(llm_configs)
+    ingress_cls = make_fastapi_ingress(base_ingress_cls)
 
     return serve.deployment(
         ingress_cls,
         **ingress_options,
-    ).bind(llm_deployments=llm_deployments, **ingress_cls_config.ingress_extra_kwargs)
+    ).bind(
+        llm_deployments=llm_deployments,
+        model_cards=model_cards,
+        lora_paths=lora_paths,
+        **ingress_cls_config.ingress_extra_kwargs,
+    )
 
 
 app = build_custom_openai_app({

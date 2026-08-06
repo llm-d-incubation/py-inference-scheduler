@@ -34,6 +34,7 @@ class DirectKVCacheLogger(StatLoggerBase):
         self,
         scheduler_stats: object,
         iteration_stats: object,
+        mm_cache_stats: object = None,
         engine_idx: int = 0,
     ) -> None:
         if self.target_dict is not None and scheduler_stats is not None:
@@ -73,10 +74,13 @@ class MetricsAwareVLLMEngine(VLLMEngine):
             return logger
 
         # Needed for injecting the logger
+        from vllm.config import VllmConfig  # type: ignore[import-not-found]
         from vllm.v1.engine.async_llm import AsyncLLM  # type: ignore[import-not-found]
         from vllm.v1.executor.abstract import Executor  # type: ignore[import-not-found]
 
-        engine_config.parallel_config.placement_group = pg  # type: ignore[attr-defined]
+        if not isinstance(engine_config, VllmConfig):
+            raise TypeError(f"expected VllmConfig, got {type(engine_config).__name__}")
+        engine_config.parallel_config.placement_group = pg
         executor_class = Executor.get_class(engine_config)
 
         # Return the engine client, passing the FACTORY instead of the instance
