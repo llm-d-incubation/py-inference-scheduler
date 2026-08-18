@@ -58,13 +58,13 @@ class SchedulerConfig:
                 "Scheduler configuration must include a 'profile_handler' "
                 "dictionary with a 'type' key."
             )
-
-        ph_type = ph_config.pop("type")
-        profile_handler = build_profile_handler(ph_type, **ph_config)
-
         profiles_dict = config_dict.get("profiles")
         if not profiles_dict:
             raise ValueError("Scheduler configuration must include a 'profiles' dictionary.")
+
+        ph_cfg = dict(ph_config)
+        ph_type = ph_cfg.pop("type")
+        profile_handler = build_profile_handler(ph_type, **ph_cfg)
 
         parsed_profiles: dict[str, SchedulerProfile] = {}
         for profile_name, prof_data in profiles_dict.items():
