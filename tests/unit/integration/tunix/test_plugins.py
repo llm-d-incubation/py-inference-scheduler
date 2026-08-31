@@ -18,7 +18,9 @@ from py_inference_scheduler.framework import CycleState, Endpoint, LLMRequest
 
 
 def _pods(**states):
-    return {name: Endpoint(name=name, attributes={"state": state}) for name, state in states.items()}
+    return {
+        name: Endpoint(name=name, attributes={"state": state}) for name, state in states.items()
+    }
 
 
 def _request():
@@ -33,7 +35,10 @@ def test_drops_non_ready_states():
 
 def test_missing_state_treated_as_unknown_and_dropped():
     f = WorkerStateFilter()
-    pods = {"a": Endpoint(name="a", attributes={"state": "READY"}), "b": Endpoint(name="b", attributes={})}
+    pods = {
+        "a": Endpoint(name="a", attributes={"state": "READY"}),
+        "b": Endpoint(name="b", attributes={}),
+    }
     assert set(f.filter(CycleState(), _request(), pods)) == {"a"}
 
 
