@@ -1,0 +1,25 @@
+# Example scheduler config for the tunix rollout decision service.
+#
+# tunix candidates carry heartbeat-derived stats:
+#   attributes.state                       -> worker_state filter (drop SYNCING/ERROR/UNKNOWN)
+#   attributes.routing_stats.num_waiting_reqs -> waiting_queue scorer
+#   attributes.queue_len                   -> least_queue scorer
+#   request prompt                         -> prefix_cache scorer
+#
+# kv_cache scorer / saturation filter are omitted: tunix samplers do not
+# report KV utilization yet (always 0).
+profile_handler:
+  type: single_profile
+profiles:
+  rl_rollout:
+    filters:
+      - type: worker_state
+    scorers:
+      - type: waiting_queue
+        weight: 5.0
+      - type: least_queue
+        weight: 2.0
+      - type: prefix_cache
+        weight: 3.0
+    picker:
+      type: max_score
