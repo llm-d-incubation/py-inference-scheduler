@@ -1,0 +1,196 @@
+# Copyright 2026 llm-d
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# RayService for the Mooncake shared-KV-tier validation on gke-gpu-rdma-cluster
+# (us-south1, 3x a3-ultragpu-8g, DRANET RDMA). This is the opt-in variant of
+# configs/ray_service.yaml: tp=2 workers that each claim 2 GPUs + 2 ConnectX-7
+# RDMA VFs, with ENABLE_MOONCAKE_KV=1 so datalayer/connectors/mooncake/kv.py
+# wires the DecodeKVSavingConnector into each replica.
+#
+# Apply order:
+#   kubectl apply -f configs/mooncake/client-config.yaml  # client ConfigMap
+#   kubectl apply -f configs/mooncake/master.yaml         # store master
+#   kubectl apply -f configs/mooncake/ray-service.yaml    # this file (RayService
+#                                     + the DRA ResourceClaimTemplate, below)
+#
+# Before applying:
+#   - IMAGE: build/push configs/mooncake/worker.Dockerfile (ray 2.56.0 + vllm
+#     0.22.0 base with the pinned mooncake wheel).
+#   - WORKING_DIR: push the mooncake-store branch so the zip below resolves.
+#   - Requires the KubeRay operator on the cluster (no rayservice CRD today):
+#     helm install kuberay-operator kuberay/kuberay-operator
+
+apiVersion: ray.io/v1
+kind: RayService
+metadata:
+  name: ray-serve-llm-mooncake
+spec:
+  serveConfigV2: |
+    applications:
+      - name: llm-app
+        import_path: integration.rayserve.router:app
+        runtime_env:
+          # REPLACE: a zip of this repository at the commit you deploy
+          working_dir: "https://github.com/<your-fork>/py-inference-scheduler/archive/refs/heads/<branch>.zip"
+          env_vars:
+            # The single operator switch for the shared KV tier. Everything
+            # else the tier needs (PYTHONHASHSEED, MC_FORCE_HCA, ...) is a
+            # fixed constant in src/py_inference_scheduler/datalayer/
+            # connectors/mooncake/kv.py, injected into the engine runtime_env
+            # by the router. MOONCAKE_CONFIG_PATH may be set here to override
+            # its default (/etc/mooncake/mooncake_config.json).
+            ENABLE_MOONCAKE_KV: "1"
+            # Push/pull relocation (requires the tier above): any engine-side
+            # abort is completed as a continuation on another replica. Nothing
+            # aborts on its own - a trigger (e.g. Part 2 preemption rescue)
+            # supplies the aborts. Optional: MOONCAKE_RELOCATION_REGISTRY_CAP
+            # (default 4096) sizes the router's push-id -> replica memory; it
+            # must exceed requests routed between a push and its pull.
+            ENABLE_MOONCAKE_RELOCATION: "1"
+  rayClusterConfig:
+    rayVersion: "2.56.0"
+    headGroupSpec:
+      rayStartParams:
+        num-cpus: "0"
+        num-gpus: "0"
+        dashboard-host: "0.0.0.0"
+      template:
+        spec:
+          # The default-pool is e2-medium (~0.9 CPU allocatable); the head fits
+          # there only with small requests. For load tests move the head to the
+          # GPU pool (add the nvidia.com/gpu toleration) - a3-ultra nodes have
+          # 224 vCPU of headroom.
+          containers:
+          - name: ray-head
+            image: <your-registry>/ray-llm-mooncake:2.56.0  # REPLACE: build from worker.Dockerfile
+            imagePullPolicy: Always
+            ports:
+            - containerPort: 8000
+              name: serve
+            - containerPort: 6379
+              name: gcs
+            - containerPort: 8265
+              name: dashboard
+            env:
+            - name: RAY_SERVE_DEFAULT_HTTP_HOST
+              value: "0.0.0.0"
+            - name: ROUTER_CONFIG_PATH
+              value: "/etc/scheduler/scheduler.yaml"
+            resources:
+              limits:
+                cpu: "900m"
+                memory: "3Gi"
+              requests:
+                cpu: "900m"
+                memory: "3Gi"
+            volumeMounts:
+            - mountPath: /tmp/ray
+              name: ray-tmp
+            - mountPath: /etc/scheduler
+              name: scheduler-vol
+          volumes:
+          - name: ray-tmp
+            emptyDir: {}
+          - name: scheduler-vol
+            configMap:
+              name: scheduler-config
+    workerGroupSpecs:
+    - replicas: 3
+      minReplicas: 3
+      maxReplicas: 3
+      numOfHosts: 1
+      groupName: gpu-group
+      rayStartParams:
+        num-gpus: "2"
+      template:
+        spec:
+          nodeSelector:
+            cloud.google.com/gke-nodepool: rdma-gpu-pool  # REPLACE: your GPU node pool
+          # Hard-spread the 3 workers across the 3 GPU nodes so validation
+          # exercises inter-node RDMA, not NIC loopback. Relax to preferred (or
+          # drop) when scaling past one replica per node (e.g. replicas: 12).
+          affinity:
+            podAntiAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+              - labelSelector:
+                  matchLabels:
+                    ray.io/group: gpu-group
+                topologyKey: kubernetes.io/hostname
+          resourceClaims:
+          - name: rdma
+            resourceClaimTemplateName: mooncake-rdma
+          containers:
+          - name: ray-worker
+            image: <your-registry>/ray-llm-mooncake:2.56.0  # REPLACE: build from worker.Dockerfile
+            imagePullPolicy: Always
+            securityContext:
+              capabilities:
+                add: ["IPC_LOCK"]   # verbs memory pinning for RDMA
+            env:
+            - name: HUGGING_FACE_HUB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: hf-secret
+                  key: hf_api_token
+            - name: RAY_SERVE_DEFAULT_HTTP_HOST
+              value: "0.0.0.0"
+            - name: ROUTER_CONFIG_PATH
+              value: "/etc/scheduler/scheduler.yaml"
+            resources:
+              limits:
+                cpu: "32"
+                memory: "128Gi"
+                nvidia.com/gpu: "2"
+              requests:
+                cpu: "32"
+                memory: "128Gi"
+                nvidia.com/gpu: "2"
+              claims:
+              - name: rdma
+            volumeMounts:
+            - mountPath: /tmp/ray
+              name: ray-tmp
+            - mountPath: /etc/scheduler
+              name: scheduler-vol
+            - mountPath: /etc/mooncake
+              name: mooncake-vol
+          volumes:
+          - name: ray-tmp
+            emptyDir: {}
+          - name: scheduler-vol
+            configMap:
+              name: scheduler-config
+          - name: mooncake-vol
+            configMap:
+              name: mooncake-config
+---
+# DRA claim template: each vLLM worker pod claims 2 of the node's 8 ConnectX-7
+# RDMA VFs (matched by the mrdma.google.com DeviceClass: dra.net devices with
+# rdma==true). count=2 pairs with tensor_parallel_size=2, so up to 4 workers can
+# share one 8-GPU / 8-NIC node. The worker pod references this via
+# spec.resourceClaims (see the worker-group snippet).
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaimTemplate
+metadata:
+  name: mooncake-rdma
+  namespace: default
+spec:
+  spec:
+    devices:
+      requests:
+      - name: rdma
+        exactly:
+          deviceClassName: mrdma.google.com
+          allocationMode: ExactCount
+          count: 2
