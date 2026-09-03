@@ -2,9 +2,12 @@
 
 ## Compatibility Notice
 
-**This integration is designed specifically for [verl v0.7.1](https://github.com/volcengine/verl/releases/tag/v0.7.1).** 
+**This integration supports two verl layouts, auto-detected at import time:**
 
-It utilizes internal API signatures (such as `load_balancer_handle` and specific `_acquire_server` patterns) that were introduced or modified in this release. It is **not backwards compatible** with earlier versions of verl and may require updates for future releases.
+- **verl v0.7.1** ("legacy"): `AsyncLLMServerManager` in `verl.experimental.agent_loop.agent_loop`, server list passed to workers.
+- **verl v0.9.x** ("modern"): `LLMServerClient` in `verl.workers.rollout.llm_server` with a `GlobalRequestLoadBalancer` actor owning the server registry; the hook bootstraps its endpoint set by draining the balancer once at first use.
+
+Both expose the same entrypoint flag (`agent_loop_manager_class=integration.verl.verl_hook.PyInferenceAgentLoopManager`). The modern path is validated GPU-free by [hook_compat_check.py](./hook_compat_check.py) (fake server actors + a real load balancer; verifies bootstrap, prefix-sticky routing, and inflight accounting). It uses internal API signatures and is **not backwards compatible** with verl versions earlier than v0.7.1; intermediate releases (v0.8.x) are untested.
 
 ## Architecture
 

@@ -17,8 +17,11 @@ class VllmEnginePatch:
                 vLLMHttpServer,
             )
             from vllm.ray import ray_env  # type: ignore[import-not-found]
-        except ImportError as e:
-            logger.info("Skipping vLLM patch (normal on head node if vLLM is not installed): %s", e)
+        except Exception as e:  # noqa: BLE001 - vLLM internals raise more than
+            # ImportError on CPU-only nodes (e.g. triton AttributeError on the
+            # Ray head); any import failure means "no vLLM here", so skip.
+            logger.info("Skipping vLLM patch (normal on head node if vLLM is not importable): %s",
+                e)
             return
 
         try:
