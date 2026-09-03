@@ -1,0 +1,61 @@
+# Pre-warms the Artifact Registry remote-repo (pull-through) cache with the
+# SWE sandbox images, so training rollouts never cold-pull from Docker Hub.
+#
+# Each indexed pod pulls a modulo-shard of the image list to /dev/null: layers
+# stream through the AR mirror (populating its cache) without being stored on
+# the node. Requires the node/pod service account to have
+# artifactregistry.reader on the mirror repo.
+#
+# Usage (see integration/verl/helpers/list_swe_images.py to generate the list):
+#   kubectl create configmap swe-image-list --from-file=images.txt=/tmp/swe_images.txt
+#   kubectl apply -f configs/swe_image_prewarm_job.yaml
+#   kubectl logs -l job-name=swe-image-prewarm -f
+#
+# completions must equal the TOTAL_SHARDS env value. Scale parallelism to
+# taste; each shard of R2E-Gym-Lite moves ~100s of GiB through the mirror.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: swe-image-prewarm
+spec:
+  completionMode: Indexed
+  completions: 16
+  parallelism: 8
+  backoffLimit: 32
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: prewarm
+          # gcrane includes the Google keychain: it auths to Artifact Registry
+          # via the pod's metadata-server credentials automatically.
+          image: gcr.io/go-containerregistry/gcrane:debug
+          command: ["/busybox/sh", "-c"]
+          args:
+            - |
+              TOTAL_SHARDS=16
+              failed=0; pulled=0; i=0
+              while IFS= read -r img; do
+                if [ $((i % TOTAL_SHARDS)) -eq "$JOB_COMPLETION_INDEX" ]; then
+                  echo "[shard $JOB_COMPLETION_INDEX] pulling $img"
+                  if gcrane pull "$img" /dev/null >/dev/null 2>&1; then
+                    pulled=$((pulled + 1))
+                  else
+                    echo "FAILED $img"
+                    failed=$((failed + 1))
+                  fi
+                fi
+                i=$((i + 1))
+              done < /images/images.txt
+              echo "[shard $JOB_COMPLETION_INDEX] done: $pulled pulled, $failed failed"
+          volumeMounts:
+            - name: image-list
+              mountPath: /images
+          resources:
+            requests:
+              cpu: "1"
+              memory: 512Mi
+      volumes:
+        - name: image-list
+          configMap:
+            name: swe-image-list
