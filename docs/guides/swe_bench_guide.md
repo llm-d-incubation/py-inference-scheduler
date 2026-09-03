@@ -2,10 +2,17 @@
 
 This guide describes how to run an agentic RL training job on [verl](https://github.com/volcengine/verl) using SWE-bench-style software engineering tasks, with rollout inference routed through `py-inference-scheduler`.
 
+> [!NOTE]
+> The reccomended usage is to use the claude skill in ./.claude/skills/swe-rl/SKILL.md This guide is to help with human understanding (AI-generated, lightly human-curated).
+
+> [!NOTE]
+> This guide currently assumes GKE/KubeRay/gVisor/verl for its underlying infra. The maintainers of this repo are very open to alternative infra-choices and welcome contributions to add expand & generalize these options.
 
 ## Architecture
 
-verl's agent loop stack is client/server: agent loops (clients) call `generate(prompt_ids) -> response_ids` against a pool of vLLM/SGLang server actors. Our [existing verl integration](../integration/verl/README.md) already replaces verl's load balancer at exactly this seam — [`InferenceSchedulerServerManager._acquire_server`](../integration/verl/verl_hook.py) routes every `generate` call through the scheduler engine, at the **token level**, with `prompt_ids` available for prefix scoring.
+verl's agent loop stack is client/server: agent loops (clients) call `generate(prompt_ids) -> response_ids` against a pool of vLLM/SGLang server actors.
+
+ [`InferenceSchedulerServerManager._acquire_server`](../integration/verl/verl_hook.py) routes every `generate` call through the scheduler engine, at the **token level**, with `prompt_ids` available for prefix scoring.
 
 This means the SWE agent loop rides on top of the existing hook unchanged: any agent loop that calls `server_manager.generate(...)` gets scheduler routing for free. Unlike proxy-based setups (e.g. the Alibaba guide's ProxyServer), no HTTP hop or token-capture middleware is needed — verl's native path is already token-in/token-out, which is what RL training requires for correct advantage computation.
 
@@ -22,19 +29,23 @@ graph TD
     SWE -->|"AgentLoopOutput(reward_score)"| ALM
 ```
 
-One design note on stickiness: verl's native `LLMServerClient` pins a trajectory to one server for all of its turns. Our hook re-routes **every** `generate` call instead. With the `prefix_cache` scorer weighted appropriately, follow-up turns naturally land on the replica holding the prefix ("soft stickiness"), while the scheduler retains freedom to move work when a replica saturates — this is the behavior we want to measure.
+One design note on stickiness: verl's native `LLMServerClient` pins a trajectory to one server for all of its turns. Our hook re-routes **every** `generate` call instead. With the `prefix_cache` scorer weighted appropriately, follow-up turns naturally land on the replica holding the prefix ("soft stickiness"), while the scheduler retains freedom to move work when a replica saturates.
 
 ---
 
 ## Phase 0 — Cluster foundation
 
-Everything in the [verl integration prerequisites](../integration/verl/README.md#prerequisites--cluster-requirements-step-1) applies (KubeRay cluster, shared `/tmp/metrics` volume, `scheduler-config` ConfigMap). SWE-bench adds:
+In addition to the [verl integration prerequisites](../integration/verl/README.md#prerequisites--cluster-requirements-step-1), SWE-bench has the following additional requirements:
 
 1. **Agent sandboxes**: install [agent-sandbox on GKE](https://docs.cloud.google.com/kubernetes-engine/docs/how-to/how-install-agent-sandbox#update-existing-gke-cluster). Sandboxes give each trajectory an isolated environment to run untrusted, model-generated code. Findings from bringing this up (July 2026, GKE 1.35):
    - The managed install ships a `secure-sandbox-policy` ValidatingAdmissionPolicy requiring gVisor, `runAsNonRoot`, dropped capabilities, resource limits, and the gVisor nodeSelector + toleration on every Sandbox.
    - **R2E/SWE task images require root** — the uv-managed interpreter lives under `/root` (mode 700) and `/testbed` is root-owned, so under `runAsNonRoot` the agent can neither run tests nor edit code. The policy binding excludes the `agents-system` namespace: run SWE sandboxes there as root while keeping gVisor, no SA token, and dropped caps voluntarily (root-inside-gVisor is the standard posture for these images). Validated template: [swe_sandbox_example.yaml](../configs/swe_sandbox_example.yaml).
-   - Measured startup latency (474 MB R2E image): **~43 s cold** (~30 s of it image pull, first pull through the mirror), **~34 s** with AR cache warm but node cold (pull is dominated by AR→node transfer/extract, not the Docker Hub fetch), **~5–10 s** when the image is already on the node. With ~4.6k distinct training images, node-cache hits are rare, so budget ~35–45 s per sandbox: per-trajectory creation is viable, warm pools add little (they can't pre-stage 4.6k images), and co-scheduling the `rollout.n` siblings that share an image onto the same nodes is the real optimization lever.
-2. **A CPU node pool for sandboxes**: rollouts need `train_batch_size × rollout.n` concurrent sandboxes at peak. Sandboxes are CPU/memory bound (git, pip, pytest) — keep them off the GPU pool. Enable autoscaling; VerlTool and DeepSWE both report needing 1000+ CPU cores at scale. (The GKE agent-sandbox install creates a gVisor node pool — size it for this concurrency.)
+2. **A CPU node pool for sandboxes**: rollouts need `train_batch_size × rollout.n` concurrent sandboxes at peak. 
+Since sandboxes are CPU/memory bound (git, pip, pytest), it is highly recommended to have a seperate CPU pool. 
+
+> [!TIP] 
+> Enable autoscaling; VerlTool and DeepSWE both report needing 1000+ CPU cores at scale. The scale up may add latency to your step time, however.
+
 3. **Image mirror**: SWE task images are per-instance and large (1–5 GiB); R2E-Gym-Lite alone is ~3.2k unique images, so bulk-copying into Artifact Registry is impractical. Use an AR **remote repository** — a pull-through cache of Docker Hub — instead: no bulk transfer, images cache on first pull, and GKE pulls at GCP-internal speed afterward.
 
    ```bash
@@ -65,9 +76,9 @@ Everything in the [verl integration prerequisites](../integration/verl/README.md
 
 ## Phase 1 — Smoke test with the existing example
 
-Before adding SWE variables, verify the cluster + integration with the stock math walkthrough from the [integration README](../integration/verl/README.md#running-a-training-job-step-3). This proves KubeRay, the scheduler hook, metrics scraping, and FSDP all work. Only then move on.
+Before adding SWE variables, verify the cluster + integration with the stock math walkthrough from the [integration README](../integration/verl/README.md#running-a-training-job-step-3). This proves KubeRay, the scheduler hook, metrics scraping, and FSDP all work.
 
-## Phase 2 — Dataset preparation
+## Phase 2 — Dataset preparation (can be done in parallel with Phase 1)
 
 **Do not train on SWE-bench Verified** — it is the community's eval set. The standard recipe:
 
@@ -128,7 +139,7 @@ Passed with `+actor_rollout_ref.rollout.agent.agent_loop_config_path=integration
 3. **Loop** until submit / max-turns / token-budget:
    - `server_manager.generate(prompt_ids=...)` — the call the scheduler routes (prefix-aware).
    - Decode assistant tokens → parse the last fenced bash block → execute in the sandbox with a per-command timeout (`SWE_CMD_TIMEOUT_S`, default 60s) → middle-truncate output (`SWE_OBS_MAX_CHARS`, default 6k chars) → tokenize as a delta user message via `apply_chat_template(remove_system_prompt=True)` → append with mask 0.
-   - If no bash block: return a protocol nudge as the observation (recoverable).
+   - If no bash block: return a [protocol nudge](../../integration/verl/swe/scaffold.py)(the NO_COMMAND_OBSERVATION const) as the observation (recoverable).
    - If the bash block is `submit`: break and grade.
 4. **Pristine grading** — `git diff HEAD` in the rollout sandbox → `filter_patch()` strips test-path chunks → apply the filtered diff in a *fresh* sandbox → run the graded tests → `reward_score` back on `AgentLoopOutput`.
 5. **Cleanup** — delete both sandboxes; return the output with `extra_fields: {swe_reason, swe_submitted}`.
@@ -151,8 +162,6 @@ Passed with `+actor_rollout_ref.rollout.agent.agent_loop_config_path=integration
 
 - RBAC: `kubectl apply -f configs/swe_sandbox_rbac.yaml` — lets the Ray pods (default/default SA) manage Sandboxes in `agents-system`.
 - The `kubernetes` Python package available in the Ray runtime env ([runtime-env-swe.yaml](../integration/verl/examples/runtime-env-swe.yaml) includes it).
-
-### Validation status (2026-07-30): PASSING end-to-end without GPUs
 
 [integration_check.py](../integration/verl/swe/integration_check.py) runs the real loop on the head pod with a *scripted* model (explore → write the gold fix via heredoc → submit) against real sandboxes and the installed verl build:
 
@@ -178,15 +187,6 @@ Sparse outcome reward, computed inside the sandbox at trajectory end:
 
 > [!IMPORTANT]
 > **R2E grading is exact status matching, not "all tests pass".** Validated in-sandbox on `aiohttp-f0d74880deec`: the spec expects `test_add_route_with_invalid_re` to remain FAILED *even after a correct fix* — an "all tests green" reward would score gold patches as failures. Pre-fix, exactly one test (the fail-to-pass one) mismatches the spec, so reward is 0 as intended. Mechanics: `cd /testbed && .venv/bin/python -m pytest /r2e_tests --junitxml=/tmp/report.xml` and compare per-test statuses; the graded suite runs in seconds, so the 5-minute cap is generous headroom for slow repos.
-
-**Both grading paths are validated end-to-end with gold patches** (2026-07-28, real sandboxes on the cluster):
-
-- **R2E** (`aiohttp-f0d74880deec`): pre-fix → 62/2 pass/fail, spec mismatch, reward 0. Gold commit applied → 63/1 with the sole failure being the expected-FAILED test → exact spec match, reward 1.
-- **SWE-bench** (`astropy__astropy-12907`): `git apply test_patch` → both F2P tests fail pre-fix (reward 0). Gold patch applied → F2P 2/2 and P2P 13/13 pass (reward 1). Run tests via the image's conda env: `/opt/miniconda3/envs/testbed/bin/python -m pytest <test ids>`.
-
-Implementation notes from the validation: write files into sandboxes via exec streams, **not `kubectl cp`** — the sandbox drops `CAP_CHOWN`, so tar exits nonzero even though file content lands. Grade order for SWE-bench rows is `test_patch` → candidate patch → F2P + P2P.
-
-**Decided: grade against a pristine state.** The agent is root in the container where tests live, so a policy can learn to delete failing tests or patch pytest. The agent loop must extract the agent's diff (filtered to non-test paths), then apply and grade it in a **fresh sandbox** the policy never touched (~35–45 s extra per trajectory, fully parallel).
 
 Grading and calibration tooling lives in [integration/verl/swe/](../integration/verl/swe/):
 
