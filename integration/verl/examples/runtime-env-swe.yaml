@@ -1,0 +1,16 @@
+# Ray runtime env for SWE RL training jobs. Submit from the repo root:
+#   ray job submit --address http://localhost:8265 \
+#       --runtime-env integration/verl/examples/runtime-env-swe.yaml \
+#       -- bash integration/verl/examples/run_swe.sh
+working_dir: "."
+pip:
+  - "kubernetes"   # SWEAgentLoop manages agent-sandbox pods
+env_vars:
+  PYTHONPATH: ".:src"   # repo root (integration/, backends/) + src layout (py_inference_scheduler)
+  PROMETHEUS_MULTIPROC_DIR: "/tmp/metrics"
+  ROUTER_CONFIG_PATH: "/etc/scheduler/scheduler.yaml"
+  SWE_SANDBOX_NAMESPACE: "agents-system"
+  SWE_CMD_TIMEOUT_S: "60"
+  SWE_OBS_MAX_CHARS: "6000"
+  SWE_SANDBOX_CPU_REQUEST: "200m"   # pack rollout sandboxes tightly (CPU quota = concurrency ceiling)
+  SWE_SANDBOX_MEM_REQUEST: "768Mi"

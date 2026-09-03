@@ -1,6 +1,8 @@
 .pytest_cache/
 __pycache__/
-build/
+build/*
+# Ray training image recipe is source, not a build artifact
+!build/ray-image/
 *.egg-info/
 dist/
 .ruff_cache/

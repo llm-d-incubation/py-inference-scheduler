@@ -17,7 +17,7 @@ class SglangEnginePatch:
             from py_inference_scheduler.datalayer.metrics.verl.sglang import (
                 get_sglang_routing_stats,
             )
-        except ImportError as e:
+        except Exception as e:  # noqa: BLE001 - see vllm.py: CPU-only nodes raise beyond ImportError
             logger.info(
                 "Skipping SGLang patch (normal on head node if SGLang is not installed): %s",
                 e,

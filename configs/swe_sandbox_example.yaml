@@ -1,0 +1,49 @@
+# Validated Sandbox shape for SWE RL rollout environments (GKE agent-sandbox).
+#
+# Two constraints discovered on GKE's managed agent-sandbox install:
+#
+# 1. A ValidatingAdmissionPolicy ('secure-sandbox-policy') requires gVisor,
+#    runAsNonRoot, dropped capabilities, resource limits, and the gVisor
+#    nodeSelector/toleration on every Sandbox.
+# 2. R2E/SWE-bench task images REQUIRE root: their uv-managed interpreter
+#    lives under /root (mode 700) and /testbed is root-owned, so under
+#    runAsNonRoot the agent can neither run tests nor edit code.
+#
+# Resolution: the policy binding excludes the 'agents-system' namespace
+# (the upstream agent-sandbox controller default). SWE sandboxes run there
+# as root, while voluntarily keeping every other protection: gVisor kernel
+# isolation, no service-account token, all capabilities dropped, resource
+# limits. Root-inside-gVisor is the standard posture for SWE RL images.
+apiVersion: agents.x-k8s.io/v1alpha1
+kind: Sandbox
+metadata:
+  name: swe-sandbox-example
+  namespace: agents-system   # excluded from secure-sandbox-policy; see header
+spec:
+  podTemplate:
+    spec:
+      runtimeClassName: gvisor
+      automountServiceAccountToken: false
+      nodeSelector:
+        sandbox.gke.io/runtime: gvisor
+      tolerations:
+        - key: sandbox.gke.io/runtime
+          operator: Equal
+          value: gvisor
+          effect: NoSchedule
+      containers:
+        - name: sandbox
+          # Per-instance task image: extra_info.docker_image from the parquet,
+          # e.g. <REGION>-docker.pkg.dev/<PROJECT>/swe-mirror/namanjain12/aiohttp_final:<commit>
+          image: <INSTANCE_IMAGE>
+          command: ["sleep", "infinity"]
+          securityContext:
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: "1"
+              memory: 2Gi
+            limits:
+              cpu: "2"
+              memory: 4Gi

@@ -1,3 +1,6 @@
+# Pods must be cattle: verl is baked into the image (build/ray-image/Dockerfile,
+# push to your registry) and datasets sync from GCS via the data-downloader
+# initContainer on EVERY group - replacement pods come up fully provisioned.
 apiVersion: ray.io/v1
 kind: RayCluster
 metadata:
@@ -20,15 +23,15 @@ spec:
           image: google/cloud-sdk:slim
           command: ["/bin/sh", "-c"]
           args:
-            - "gcloud storage cp --recursive gs://<your-bucket-name>/data /home/ray/"
+            - 'gcloud storage cp -r "gs://<your-bucket-name>/data/*" /home/ray/data/'
           volumeMounts:
           - mountPath: /home/ray/data
             name: data
         containers:
         - name: ray-head
-          image: verlai/verl:vllm011.latest
-          imagePullPolicy: Always
-          # Optional, but recommended; WANDB has a great UI
+          image: <REGION>-docker.pkg.dev/<PROJECT>/ray-images/verl-swe:<VERL_COMMIT>-v1
+          imagePullPolicy: IfNotPresent
+          # Optional, but reccommended; WANDB has a great UI
           # env:
           # - name: WANDB_API_KEY
           #   valueFrom:
@@ -85,14 +88,14 @@ spec:
           image: google/cloud-sdk:slim
           command: ["/bin/sh", "-c"]
           args:
-            - "gcloud storage cp --recursive gs://<your-bucket-name>/data /home/ray/"
+            - 'gcloud storage cp -r "gs://<your-bucket-name>/data/*" /home/ray/data/'
           volumeMounts:
           - mountPath: /home/ray/data
             name: data
         containers:
         - name: ray-worker
-          image: verlai/verl:vllm011.latest
-          imagePullPolicy: Always
+          image: <REGION>-docker.pkg.dev/<PROJECT>/ray-images/verl-swe:<VERL_COMMIT>-v1
+          imagePullPolicy: IfNotPresent
           env:
           - name: HUGGING_FACE_HUB_TOKEN
             valueFrom:

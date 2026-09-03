@@ -1,0 +1,5 @@
+# Registers the SWE agent loop with verl's agent-loop registry.
+# Pass via: +actor_rollout_ref.rollout.agent.agent_loop_config_path=integration/verl/examples/swe_agent_loop.yaml
+# Dataset rows select it with agent_name == "swe_agent" (set by prepare_swe_dataset.py).
+- name: swe_agent
+  _target_: integration.verl.swe.swe_agent_loop.SWEAgentLoop
