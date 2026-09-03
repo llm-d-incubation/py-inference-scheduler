@@ -2,18 +2,6 @@
 
 This guide describes how to run an agentic RL training job on [verl](https://github.com/volcengine/verl) using SWE-bench-style software engineering tasks, with rollout inference routed through `py-inference-scheduler`.
 
-**Status**: Validated end-to-end. Everything described here is implemented ([integration/verl/swe](../integration/verl/swe/)) and has run real training: GRPO on calibrated R2E instances with graded solves (Qwen2.5-7B: 0.3% solve rate; Qwen3-32B: **4.9%**, 19/384), zero sandbox errors across full runs, and a first scheduler A/B showing **−10% per-trajectory generation latency** with prefix-aware routing (Phase 6). The doc doubles as the operational runbook — every failure mode listed was actually hit — and the [`swe-rl` skill](../.claude/skills/swe-rl/SKILL.md) wraps the day-to-day operations (preflight → launch → monitor → recover).
-
-## Prior art
-
-| Resource | What it gives us |
-|---|---|
-| [verl Agentic RL docs](https://verl.readthedocs.io/en/latest/start/agentic_rl.html) | Core async rollout + AgentLoop architecture |
-| [verl Agent Loop internals](https://verl.readthedocs.io/en/latest/advance/agent_loop.html) | `AgentLoopBase` interface, token-in/token-out contract |
-| [Alibaba ACK verl + SWE-bench guide](https://help.aliyun.com/en/ack/training-agentic-reinforcement-learning-on-ack-using-the-verl-framework) | End-to-end k8s reference: sandbox pods, reward design, GRPO params, troubleshooting. Note: they inject an HTTP proxy to capture tokens; we don't need one (see below). |
-| [Practitioner's Guide to Multi-turn Agentic RL](https://arxiv.org/abs/2510.01132) | Tuned hyperparameter recipe on verl, incl. SWE-Gym |
-| [DeepSWE recipe](https://www.together.ai/blog/deepswe) | Algorithm tricks for convergence (clip-high, no KL, compact filtering) and reward design |
-| [SWE-Gym](https://github.com/SWE-Gym/SWE-Gym) / [R2E-Gym](https://github.com/R2E-Gym/R2E-Gym) | Training environments with per-instance Docker images |
 
 ## Architecture
 
@@ -283,34 +271,13 @@ Compare, per step (all already emitted — see the [integration README log refer
 
 The hook supports **verl v0.7.1 (legacy) and v0.9.x (modern) layouts, auto-detected at import** ([compat notice](../integration/verl/README.md#compatibility-notice)). The modern port was required because 0.9.x moved routing into a `GlobalRequestLoadBalancer` Ray actor (`verl/workers/rollout/llm_server.py`) that owns the server registry; the hook's client bootstraps its endpoint set by draining the balancer once at first use, then routes via the scheduler engine with verl's LB as fallback. Validated GPU-free on the cluster's **0.9.0.dev** build by [hook_compat_check.py](../integration/verl/hook_compat_check.py) — PASS: 3 endpoints bootstrapped, all same-prefix requests prefix-routed to one server, inflight and LB counters clean. The **SWEAgentLoop is likewise verified against 0.9.0.dev** ([integration_check.py](../integration/verl/swe/integration_check.py)) and tolerates older builds where `generate` returned a bare token list. One robustness fix that came out of this: the vLLM/SGLang engine patches now skip on *any* import failure, not just ImportError — CPU-only nodes (the Ray head) raise `AttributeError` from triton during vLLM import.
 
-## Open items
+## Prior art
 
-- [x] Choose training set → R2E-Gym (train) + SWE-bench Verified (eval)
-- [x] Dataset preprocessing script → [prepare_swe_dataset.py](../integration/verl/helpers/prepare_swe_dataset.py)
-- [x] Image mirror → AR remote repo (pull-through cache) + pre-warm Job ([list_swe_images.py](../integration/verl/helpers/list_swe_images.py), [swe_image_prewarm_job.yaml](../configs/swe_image_prewarm_job.yaml)); pre-warm launched over all 5,078 images 2026-07-28 — check `kubectl logs -l job-name=swe-image-prewarm` for `FAILED` lines (Docker Hub rate limits)
-- [x] Full preprocessing run → `/home/ray/data/swe/{train,test}.parquet` on the Ray head pod (4,578 train / 500 eval; contamination filter saw all 12 eval repos, 0 overlaps). Caveat: the cluster's `data` volume is an emptyDir — head-pod-local, not shared with workers
-- [x] Sandbox lifecycle → measured (43 s cold / 34 s AR-warm / ~5–10 s node-warm; per-trajectory creation viable, warm pools low-value; see Phase 0). Validated template: [swe_sandbox_example.yaml](../configs/swe_sandbox_example.yaml)
-- [x] `SWEAgentLoop` implementation in [integration/verl/swe/](../integration/verl/swe/); scaffold, pristine grader, sandbox client, RBAC, 12 unit tests
-- [x] End-to-end loop validation without GPUs → [integration_check.py](../integration/verl/swe/integration_check.py) PASSING on the head pod (scripted gold-fix rollout → reward 1.0)
-- [x] Training entrypoint → [run_swe.sh](../integration/verl/examples/run_swe.sh) + [runtime-env-swe.yaml](../integration/verl/examples/runtime-env-swe.yaml)
-- [x] Calibration sweep v2 complete (4,578 instances): 3,293 kept → `train_calibrated.parquet` on all pods (used by the 20-step run). Recoverable later: ~824 tail-repo key-mismatches (one more spec-key convention to decode) + ~422 transient sandbox-errors worth a retry pass (~+1,200 instances)
-- [x] Port [verl_hook.py](../integration/verl/verl_hook.py) to verl 0.9.x → dual-layout hook, [hook_compat_check.py](../integration/verl/hook_compat_check.py) PASSING on the cluster build (bootstrap + prefix-sticky routing + clean accounting)
-- [x] First GPU smoke run → **SUCCEEDED 2026-07-30** (`raysubmit_AtVLsMFd4uHUZL1r`, W&B project `swe-rl-scheduler`, run `qwen7b_r2e_smoke_2`): 2 GRPO steps, batch 8 × n 2, Qwen2.5-7B on 8×H100. Findings:
-  - Real agentic rollouts: `num_turns` mean 37–44, max 65; response mean ~6.5k tokens, max 27k (near budget)
-  - **Token discipline proven under real generation**: `rollout_probs_pearson_corr = 0.999` — loop token/mask accounting matches trainer recompute
-  - Rewards all 0.0 (expected for untuned 7B on R2E; `grad_norm = 0` on all-zero-advantage batches is normal GRPO cold-start)
-  - **Sandbox exec dominates wall clock**: `tool_calls` mean 386 s/trajectory vs 26 s of generation; step time ~1,050 s. Sandbox throughput, not GPU, is the current bottleneck — sizing/locality work will pay off more than anything GPU-side at small scale
-  - Fixes that came out of smoke iteration: data must exist on **all** Ray pods (emptyDir is per-pod; first attempt died on a worker-scheduled TaskRunner), empty-response trajectories crash verl's padding (loop now emits one loss-masked pad token), sandbox boot now overlaps the first generate, `SWE_SANDBOX_WAIT_S` default 600 s, and **autoscaling enabled on `agent-sandbox-pool` (3→24 nodes)** after the calibration sweep starved the smoke run's sandboxes
-  - **W&B history can silently vanish** (run exists with config + system stats, zero metric rows, state "crashed"): the SDK→service channel appears to die during the long idle gaps between steps on Ray + wandb-core 0.22, while service-side stats keep flowing. SDK and network proven healthy via minimal probes in the same pod. Recovery: the console logs always carry full per-step metrics — [backfill_wandb.py](../integration/verl/helpers/backfill_wandb.py) parses `step:N - k:v` lines from the ray job log and re-logs them into the same run (`--run_id`). Run it as a post-job safety net until the upstream cause is fixed; a newer wandb via runtime-env `pip:` is worth a try next run
-- [x] Reward-path validation with gold patches → both dataset kinds validated 0→1 in real sandboxes (R2E exact-match; SWE-bench test_patch + F2P/P2P; see Phase 4)
-- [x] Pristine-state grading design → fresh-sandbox grading decided; grader + sandbox client + calibration tooling built ([integration/verl/swe/](../integration/verl/swe/)); full 4,578-instance sweep launched 2026-07-30 (results land in `/tmp/calibration_full.jsonl` on the workstation) — filter the train parquet with the keep-list when it finishes
-- [x] **First learning signal** — 20-step run SUCCEEDED 2026-08-03 (`qwen7b_r2e_20step_1`, W&B run `go8e82dc`): batch 8 × n 4 on the calibrated set, 3.6 h, **zero sandbox errors across 640 trajectories**. Steps 4 and 7 each solved one instance (`critic/score/max = 1.0`) → first mixed GRPO groups → first real policy-gradient updates. Step times 525→656 s (calibrated data + free pool + node-warm images + concurrent boot cut steps ~40% vs smoke despite 2× trajectories); no leak signature. W&B synced live through step 18 (short steps stay under the idle timeout; final steps backfilled). Next signal levers: stronger base model (Qwen3-14B → Qwen3-Coder-30B-A3B), easier-first curriculum via R2E difficulty metadata, larger `n`.
-- [x] **Worker pods are pets — make them cattle.** The Ray GPU workers carry manual state (verl editable install @ pinned commit at `/tmp/verl`, parquets at `/home/ray/data/swe`, HF model cache). GKE node repairs replaced two workers in three days (2026-07-31, 2026-08-02); each fresh pod broke jobs (`ModuleNotFoundError: No module named 'verl'`, missing parquets) until re-provisioned by hand:
-  ```bash
-  kubectl exec <worker> -- sh -c 'mkdir -p /tmp/verl && cd /tmp/verl && git clone https://github.com/volcengine/verl.git && cd verl && git checkout <PINNED_COMMIT> && pip install -e . --no-deps'
-  kubectl exec <head> -- tar cf - -C /home/ray/data swe | kubectl exec -i <worker> -- tar xf - -C /home/ray/data
-  ```
-  Durable fix (implemented 2026-08-26): **bake verl@commit into the Ray image** ([build/ray-image/Dockerfile](../build/ray-image/Dockerfile) — digest-pinned base, verl fetched at the validated commit, `kubernetes` included; build with `gcloud builds submit build/ray-image --tag <REGION>-docker.pkg.dev/<PROJECT>/ray-images/verl-swe:<COMMIT>-v1`) and **sync datasets from GCS at pod boot** via a `data-downloader` initContainer on every group ([verl-inference-scheduler.yaml](../integration/verl/examples/verl-inference-scheduler.yaml)); grant the node compute SA `roles/storage.objectViewer` on the bucket. The cluster's Aug-10 rebuild + a third node replacement wiped ALL pod state (including the calibration keep-list, whose only copies lived in emptyDirs and /tmp) — datasets now live at `gs://<bucket>/data/{swe,deepmath,deepscaler}` and pods self-provision. Note `verlai/verl:vllm011.latest` is a moving tag; never use it directly.
-- [x] **Qwen3-32B validated** (2026-08-28, `qwen3_32b_r2e_1`, W&B `5ecb0uqg`): 6 steps, TP4 + full FSDP offload on an H100-80GB node (fits the tight case), thinking mode disabled via `+data.apply_chat_template_kwargs.enable_thinking=false`. **19/384 solves (4.9%) vs 7B's 0.3% — 16×**; solves in 5/6 steps, mixed GRPO groups nearly every step. Step times ~7B-class. 32B is the training base going forward.
-- [x] A/B benchmark → first result 2026-08-27 (see Phase 6): scheduler cut per-trajectory generation latency **−10% (8/11 steps consistent)**; rollout wall clock inconclusive at quota-capped 64-concurrency (sandbox-dominated, noise > effect). Sharpening path: quota bump → higher concurrency, repeat runs, engine cache-hit telemetry
-- [x] Skill conversion → project skill at [.claude/skills/swe-rl/SKILL.md](../.claude/skills/swe-rl/SKILL.md) (preflight → launch → monitor → recover runbook) backed by [preflight.py](../integration/verl/swe/preflight.py), a deterministic checker for sandbox env + RBAC + live sandbox smoke test + verl-on-all-pods + parquet replicas + hygiene (validated: 20 pass / 0 fail on the cluster, and it caught a leaked grading sandbox on its first run)
+| Resource | What it gives us |
+|---|---|
+| [verl Agentic RL docs](https://verl.readthedocs.io/en/latest/start/agentic_rl.html) | Core async rollout + AgentLoop architecture |
+| [verl Agent Loop internals](https://verl.readthedocs.io/en/latest/advance/agent_loop.html) | `AgentLoopBase` interface, token-in/token-out contract |
+| [Alibaba ACK verl + SWE-bench guide](https://help.aliyun.com/en/ack/training-agentic-reinforcement-learning-on-ack-using-the-verl-framework) | End-to-end k8s reference: sandbox pods, reward design, GRPO params, troubleshooting. Note: they inject an HTTP proxy to capture tokens; we don't need one (see below). |
+| [Practitioner's Guide to Multi-turn Agentic RL](https://arxiv.org/abs/2510.01132) | Tuned hyperparameter recipe on verl, incl. SWE-Gym |
+| [DeepSWE recipe](https://www.together.ai/blog/deepswe) | Algorithm tricks for convergence (clip-high, no KL, compact filtering) and reward design |
+| [SWE-Gym](https://github.com/SWE-Gym/SWE-Gym) / [R2E-Gym](https://github.com/R2E-Gym/R2E-Gym) | Training environments with per-instance Docker images |
