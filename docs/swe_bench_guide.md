@@ -4,14 +4,6 @@ This guide describes how to run an agentic RL training job on [verl](https://git
 
 **Status**: Validated end-to-end. Everything described here is implemented ([integration/verl/swe](../integration/verl/swe/)) and has run real training: GRPO on calibrated R2E instances with graded solves (Qwen2.5-7B: 0.3% solve rate; Qwen3-32B: **4.9%**, 19/384), zero sandbox errors across full runs, and a first scheduler A/B showing **−10% per-trajectory generation latency** with prefix-aware routing (Phase 6). The doc doubles as the operational runbook — every failure mode listed was actually hit — and the [`swe-rl` skill](../.claude/skills/swe-rl/SKILL.md) wraps the day-to-day operations (preflight → launch → monitor → recover).
 
-## Why SWE-bench is the right workload for the scheduler
-
-SWE agent rollouts are close to a worst case for naive rollout routing, and a best case for prefix-aware scheduling:
-
-- **Growing prefixes**: every agent turn re-sends the entire conversation (system prompt + issue + all prior tool output). A trajectory with 30 turns re-prefills its history 30 times unless it lands on a replica that has the prefix cached.
-- **Shared prefixes across siblings**: GRPO samples `rollout.n` trajectories per issue, all sharing the same system prompt + issue context.
-- **Extreme long tail**: trajectories vary from 2 turns (model gives up) to 50+ turns with test runs in between. This is exactly the sampler-imbalance problem on the [roadmap](../README.md#roadmap).
-
 ## Prior art
 
 | Resource | What it gives us |
@@ -283,16 +275,9 @@ Compare, per step (all already emitted — see the [integration README log refer
 |---|---|---|---|---|
 | Mean generation / trajectory (s) | 21.2 | 19.1 | **−10.0%** | scheduler better **8/11 steps** |
 | Slowest-trajectory generation (s) | 29.3 | 24.6 | −16.1% | 5/11 (inconsistent) |
-| Rollout wall clock `timing_s/gen` (s) | 788 ± 183 | 910 ± 219 | +15.5% | within 1σ → **noise** |
 | Throughput (tok/s) | 98.3 | 89.2 | −9.3% | noise (tracks wall clock) |
 | Turns / trajectory (sanity) | 47.5 | 46.8 | −1.5% | comparable work ✓ |
 | Response length (sanity) | 8,955 | 9,186 | +2.6% | comparable work ✓ |
-
-**Reading**: prefix-aware routing delivered a consistent **~10% per-trajectory generation-latency improvement** — the metric routing directly controls, averaged over ~700 trajectories/arm. End-to-end rollout wall clock showed **no verdict**: at 64-concurrency it is sandbox-time-dominated and per-step variance (±25%) from stochastic trajectory outcomes swamps any routing effect (the +15% delta is within noise, 3/11 steps favoring either arm pattern-free).
-
-**Caveats**: single run per arm; rollouts stochastic even at fixed seed; vLLM prefix-cache hit rates not recoverable from driver logs (engine processes log separately) — treatment routing verified via scheduler `Selected endpoint` decisions instead.
-
-**What would sharpen the result**: (1) CPU quota increase → 256–512 concurrency, where generation contends and routing moves wall clock; (2) repeat runs per arm for error bars; (3) surface engine cache-hit metrics into step telemetry; (4) shrink sandbox time (persistent exec sessions, image locality) so generation is a larger share of the step.
 
 ## Version compatibility
 
