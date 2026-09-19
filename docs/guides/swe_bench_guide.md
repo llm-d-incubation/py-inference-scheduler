@@ -3,7 +3,7 @@
 This guide describes how to run an agentic RL training job on [verl](https://github.com/volcengine/verl) using SWE-bench-style software engineering tasks, with rollout inference routed through `py-inference-scheduler`.
 
 > [!NOTE]
-> The reccomended usage is to use the claude skill in ./.claude/skills/swe-rl/SKILL.md This guide is to help with human understanding (AI-generated, lightly human-curated).
+> The recommended usage is to use the claude skill in ./.claude/skills/swe-rl/SKILL.md This guide is to help with human understanding (AI-generated, lightly human-curated).
 
 > [!NOTE]
 > This guide currently assumes GKE/KubeRay/gVisor/verl for its underlying infra. The maintainers of this repo are very open to alternative infra-choices and welcome contributions to add expand & generalize these options.
@@ -41,7 +41,7 @@ In addition to the [verl integration prerequisites](../integration/verl/README.m
    - The managed install ships a `secure-sandbox-policy` ValidatingAdmissionPolicy requiring gVisor, `runAsNonRoot`, dropped capabilities, resource limits, and the gVisor nodeSelector + toleration on every Sandbox.
    - **R2E/SWE task images require root** — the uv-managed interpreter lives under `/root` (mode 700) and `/testbed` is root-owned, so under `runAsNonRoot` the agent can neither run tests nor edit code. The policy binding excludes the `agents-system` namespace: run SWE sandboxes there as root while keeping gVisor, no SA token, and dropped caps voluntarily (root-inside-gVisor is the standard posture for these images). Validated template: [swe_sandbox_example.yaml](../configs/swe_sandbox_example.yaml).
 2. **A CPU node pool for sandboxes**: rollouts need `train_batch_size × rollout.n` concurrent sandboxes at peak. 
-Since sandboxes are CPU/memory bound (git, pip, pytest), it is highly recommended to have a seperate CPU pool. 
+Since sandboxes are CPU/memory bound (git, pip, pytest), it is highly recommended to have a separate CPU pool.
 
 > [!TIP] 
 > Enable autoscaling; VerlTool and DeepSWE both report needing 1000+ CPU cores at scale. The scale up may add latency to your step time, however.
