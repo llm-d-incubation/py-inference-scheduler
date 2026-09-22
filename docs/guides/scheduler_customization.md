@@ -27,7 +27,7 @@ graph TD
 
 The scheduler is configured via a `scheduler.yaml` file. 
 
-*   **Reference Example**: For a production-ready reference, see [scheduler.yaml](../integration/verl/examples/scheduler.yaml).
+*   **Reference Example**: For a production-ready reference, see [scheduler.yaml](../../integration/verl/examples/scheduler.yaml).
 
 ### Schema Template
 
@@ -114,7 +114,7 @@ Flow control plugins prevent replica overload and mid-decoding preemptions by co
     *   `drip_threshold_kv` (float, default: `0.1`): Max physical KV utilization for drip eligibility.
     *   `drip_interval_s` (float, default: `2.0`): Minimum time between drip admissions.
     *   `default_osl` (int, default: `1024`): Default output sequence length estimate used before stats are learned.
-    *   *More Info*: For a detailed deep-dive into how KV saturation budgeting works and its mathematical model, see the [KV Saturation Guide](./kv_saturation.md).
+    *   *More Info*: For a detailed deep-dive into how KV saturation budgeting works and its mathematical model, see the [KV Saturation Guide](../kv_saturation.md).
 
 ---
 

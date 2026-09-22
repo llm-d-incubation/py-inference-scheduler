@@ -12,7 +12,7 @@ This guide describes how to run an agentic RL training job on [verl](https://git
 
 verl's agent loop stack is client/server: agent loops (clients) call `generate(prompt_ids) -> response_ids` against a pool of vLLM/SGLang server actors.
 
- [`InferenceSchedulerServerManager._acquire_server`](../integration/verl/verl_hook.py) routes every `generate` call through the scheduler engine, at the **token level**, with `prompt_ids` available for prefix scoring.
+ [`InferenceSchedulerServerManager._acquire_server`](../../integration/verl/verl_hook.py) routes every `generate` call through the scheduler engine, at the **token level**, with `prompt_ids` available for prefix scoring.
 
 This means the SWE agent loop rides on top of the existing hook unchanged: any agent loop that calls `server_manager.generate(...)` gets scheduler routing for free. Unlike proxy-based setups (e.g. the Alibaba guide's ProxyServer), no HTTP hop or token-capture middleware is needed — verl's native path is already token-in/token-out, which is what RL training requires for correct advantage computation.
 
@@ -35,11 +35,11 @@ One design note on stickiness: verl's native `LLMServerClient` pins a trajectory
 
 ## Phase 0 — Cluster foundation
 
-In addition to the [verl integration prerequisites](../integration/verl/README.md#prerequisites--cluster-requirements-step-1), SWE-bench has the following additional requirements:
+In addition to the [verl integration prerequisites](../../integration/verl/README.md#prerequisites--cluster-requirements-step-1), SWE-bench has the following additional requirements:
 
 1. **Agent sandboxes**: install [agent-sandbox on GKE](https://docs.cloud.google.com/kubernetes-engine/docs/how-to/how-install-agent-sandbox#update-existing-gke-cluster). Sandboxes give each trajectory an isolated environment to run untrusted, model-generated code. Findings from bringing this up (July 2026, GKE 1.35):
    - The managed install ships a `secure-sandbox-policy` ValidatingAdmissionPolicy requiring gVisor, `runAsNonRoot`, dropped capabilities, resource limits, and the gVisor nodeSelector + toleration on every Sandbox.
-   - **R2E/SWE task images require root** — the uv-managed interpreter lives under `/root` (mode 700) and `/testbed` is root-owned, so under `runAsNonRoot` the agent can neither run tests nor edit code. The policy binding excludes the `agents-system` namespace: run SWE sandboxes there as root while keeping gVisor, no SA token, and dropped caps voluntarily (root-inside-gVisor is the standard posture for these images). Validated template: [swe_sandbox_example.yaml](../configs/swe_sandbox_example.yaml).
+   - **R2E/SWE task images require root** — the uv-managed interpreter lives under `/root` (mode 700) and `/testbed` is root-owned, so under `runAsNonRoot` the agent can neither run tests nor edit code. The policy binding excludes the `agents-system` namespace: run SWE sandboxes there as root while keeping gVisor, no SA token, and dropped caps voluntarily (root-inside-gVisor is the standard posture for these images). Validated template: [swe_sandbox_example.yaml](../../configs/swe_sandbox_example.yaml).
 2. **A CPU node pool for sandboxes**: rollouts need `train_batch_size × rollout.n` concurrent sandboxes at peak. 
 Since sandboxes are CPU/memory bound (git, pip, pytest), it is highly recommended to have a seperate CPU pool. 
 
@@ -62,7 +62,7 @@ Since sandboxes are CPU/memory bound (git, pip, pytest), it is highly recommende
        --registry_rewrite "docker.io/=<REGION>-docker.pkg.dev/<PROJECT>/swe-mirror/"
    ```
 
-   Then pre-warm the cache so rollouts never cold-pull from Docker Hub: [list_swe_images.py](../integration/verl/helpers/list_swe_images.py) emits the unique image refs from the parquet files, and [swe_image_prewarm_job.yaml](../configs/swe_image_prewarm_job.yaml) is a sharded in-cluster Job that pulls them through the mirror (layers stream to `/dev/null`; nothing lands on node disk):
+   Then pre-warm the cache so rollouts never cold-pull from Docker Hub: [list_swe_images.py](../../integration/verl/helpers/list_swe_images.py) emits the unique image refs from the parquet files, and [swe_image_prewarm_job.yaml](../../configs/swe_image_prewarm_job.yaml) is a sharded in-cluster Job that pulls them through the mirror (layers stream to `/dev/null`; nothing lands on node disk):
 
    ```bash
    python integration/verl/helpers/list_swe_images.py \
@@ -76,7 +76,7 @@ Since sandboxes are CPU/memory bound (git, pip, pytest), it is highly recommende
 
 ## Phase 1 — Smoke test with the existing example
 
-Before adding SWE variables, verify the cluster + integration with the stock math walkthrough from the [integration README](../integration/verl/README.md#running-a-training-job-step-3). This proves KubeRay, the scheduler hook, metrics scraping, and FSDP all work.
+Before adding SWE variables, verify the cluster + integration with the stock math walkthrough from the [integration README](../../integration/verl/README.md#running-a-training-job-step-3). This proves KubeRay, the scheduler hook, metrics scraping, and FSDP all work.
 
 ## Phase 2 — Dataset preparation (can be done in parallel with Phase 1)
 
@@ -96,7 +96,7 @@ Convert to verl parquet with a preprocessing script (pattern: `examples/data_pre
 
 The `extra_info` fields are delivered to the agent loop's `run(**kwargs)` as dataset fields, which is how the loop knows which sandbox image to claim and which tests to grade with. Note the grading difference: R2E-Gym ships `expected_output_json` (test name → expected status after a correct fix) instead of SWE-bench's F2P/P2P lists, so the reward step branches on `dataset_kind`.
 
-This is implemented in [prepare_swe_dataset.py](../integration/verl/helpers/prepare_swe_dataset.py):
+This is implemented in [prepare_swe_dataset.py](../../integration/verl/helpers/prepare_swe_dataset.py):
 
 ```bash
 # full run
@@ -111,14 +111,14 @@ It applies the contamination filter automatically (drops R2E-Gym rows whose repo
 
 ## Phase 3 — The SWE agent loop
 
-Implemented in [integration/verl/swe/](../integration/verl/swe/). Four modules, with only the loop itself importing verl:
+Implemented in [integration/verl/swe/](../../integration/verl/swe/). Four modules, with only the loop itself importing verl:
 
 | Module | Role |
 |---|---|
-| [swe_agent_loop.py](../integration/verl/swe/swe_agent_loop.py) | The verl `AgentLoopBase` implementation; `@register("swe_agent")` |
-| [scaffold.py](../integration/verl/swe/scaffold.py) | Pure helpers: bash-block protocol, observation formatting, diff filtering, system prompt |
-| [pristine_grader.py](../integration/verl/swe/pristine_grader.py) | Scores an agent patch in a fresh sandbox (anti-reward-hacking) |
-| [sandbox.py](../integration/verl/swe/sandbox.py) | Sandbox CR client (create/wait/exec/write_file/delete); shared by loop + grader + calibration |
+| [swe_agent_loop.py](../../integration/verl/swe/swe_agent_loop.py) | The verl `AgentLoopBase` implementation; `@register("swe_agent")` |
+| [scaffold.py](../../integration/verl/swe/scaffold.py) | Pure helpers: bash-block protocol, observation formatting, diff filtering, system prompt |
+| [pristine_grader.py](../../integration/verl/swe/pristine_grader.py) | Scores an agent patch in a fresh sandbox (anti-reward-hacking) |
+| [sandbox.py](../../integration/verl/swe/sandbox.py) | Sandbox CR client (create/wait/exec/write_file/delete); shared by loop + grader + calibration |
 
 ### Registration
 
@@ -134,7 +134,7 @@ Passed with `+actor_rollout_ref.rollout.agent.agent_loop_config_path=integration
 
 `SWEAgentLoop.run(sampling_params, **kwargs)`:
 
-1. **Sandbox** — create an agent-sandbox pod from the instance image in `agents-system` ([swe_sandbox_rbac.yaml](../configs/swe_sandbox_rbac.yaml) grants the Ray SA cross-namespace access).
+1. **Sandbox** — create an agent-sandbox pod from the instance image in `agents-system` ([swe_sandbox_rbac.yaml](../../configs/swe_sandbox_rbac.yaml) grants the Ray SA cross-namespace access).
 2. **Prompt** — build the system prompt (task framing + bash-block protocol from `scaffold.py`) and tokenize.
 3. **Loop** until submit / max-turns / token-budget:
    - `server_manager.generate(prompt_ids=...)` — the call the scheduler routes (prefix-aware).
@@ -161,9 +161,9 @@ Passed with `+actor_rollout_ref.rollout.agent.agent_loop_config_path=integration
 ### Prerequisites
 
 - RBAC: `kubectl apply -f configs/swe_sandbox_rbac.yaml` — lets the Ray pods (default/default SA) manage Sandboxes in `agents-system`.
-- The `kubernetes` Python package available in the Ray runtime env ([runtime-env-swe.yaml](../integration/verl/examples/runtime-env-swe.yaml) includes it).
+- The `kubernetes` Python package available in the Ray runtime env ([runtime-env-swe.yaml](../../integration/verl/examples/runtime-env-swe.yaml) includes it).
 
-[integration_check.py](../integration/verl/swe/integration_check.py) runs the real loop on the head pod with a *scripted* model (explore → write the gold fix via heredoc → submit) against real sandboxes and the installed verl build:
+[integration_check.py](../../integration/verl/swe/integration_check.py) runs the real loop on the head pod with a *scripted* model (explore → write the gold fix via heredoc → submit) against real sandboxes and the installed verl build:
 
 ```bash
 # copy the package to the head pod, then:
@@ -188,11 +188,11 @@ Sparse outcome reward, computed inside the sandbox at trajectory end:
 > [!IMPORTANT]
 > **R2E grading is exact status matching, not "all tests pass".** Validated in-sandbox on `aiohttp-f0d74880deec`: the spec expects `test_add_route_with_invalid_re` to remain FAILED *even after a correct fix* — an "all tests green" reward would score gold patches as failures. Pre-fix, exactly one test (the fail-to-pass one) mismatches the spec, so reward is 0 as intended. Mechanics: `cd /testbed && .venv/bin/python -m pytest /r2e_tests --junitxml=/tmp/report.xml` and compare per-test statuses; the graded suite runs in seconds, so the 5-minute cap is generous headroom for slow repos.
 
-Grading and calibration tooling lives in [integration/verl/swe/](../integration/verl/swe/):
+Grading and calibration tooling lives in [integration/verl/swe/](../../integration/verl/swe/):
 
-- [grader.py](../integration/verl/swe/grader.py) — pure grading logic (junitxml → status map → `grade_r2e` exact-match / `grade_swebench` F2P+P2P), unit-tested in [tests/test_swe_grader.py](../tests/test_swe_grader.py). Name mapping handles class-based, module-level, parametrized, and underscore-prefixed (`_BaseTest`) tests.
-- [sandbox.py](../integration/verl/swe/sandbox.py) — Sandbox CR client (create/wait/exec/write_file/delete) encoding the validated pod shape. Gotchas baked in: file writes go over exec+base64 (`CAP_CHOWN` breaks `kubectl cp`), exec retries transient websocket races, and clients must be **per-thread** — the kubernetes client's GKE auth races when shared across threads.
-- [calibrate.py](../integration/verl/swe/calibrate.py) — the **calibration sweep**: runs the pre-fix suite for every instance in a real gVisor sandbox and keeps only instances that are (1) key-exact vs the spec, (2) deterministic across two runs, (3) not already solved pre-fix, (4) within the time cap. Catches runc→gVisor drift and flaky tests before they poison GRPO groups, and emits a keep-list to filter the training parquet with. The first sweep surfaced two systematic R2E spec conventions, now baked into the grader's key normalization: specs mangle `::` inside parametrized values into `.` (their node-id splitting), and **skipped tests are excluded from specs** (platform-conditional tests skip under Linux/gVisor), so the grader drops SKIPPED before comparing:
+- [grader.py](../../integration/verl/swe/grader.py) — pure grading logic (junitxml → status map → `grade_r2e` exact-match / `grade_swebench` F2P+P2P), unit-tested in [tests/test_swe_grader.py](../../tests/test_swe_grader.py). Name mapping handles class-based, module-level, parametrized, and underscore-prefixed (`_BaseTest`) tests.
+- [sandbox.py](../../integration/verl/swe/sandbox.py) — Sandbox CR client (create/wait/exec/write_file/delete) encoding the validated pod shape. Gotchas baked in: file writes go over exec+base64 (`CAP_CHOWN` breaks `kubectl cp`), exec retries transient websocket races, and clients must be **per-thread** — the kubernetes client's GKE auth races when shared across threads.
+- [calibrate.py](../../integration/verl/swe/calibrate.py) — the **calibration sweep**: runs the pre-fix suite for every instance in a real gVisor sandbox and keeps only instances that are (1) key-exact vs the spec, (2) deterministic across two runs, (3) not already solved pre-fix, (4) within the time cap. Catches runc→gVisor drift and flaky tests before they poison GRPO groups, and emits a keep-list to filter the training parquet with. The first sweep surfaced two systematic R2E spec conventions, now baked into the grader's key normalization: specs mangle `::` inside parametrized values into `.` (their node-id splitting), and **skipped tests are excluded from specs** (platform-conditional tests skip under Linux/gVisor), so the grader drops SKIPPED before comparing:
 
   ```bash
   uv run --with kubernetes --with pandas --with pyarrow python \
@@ -207,7 +207,7 @@ Return it via `AgentLoopOutput.reward_score` (field verified present in verl). O
 
 ## Phase 5 — Training configuration
 
-Ready to run: [run_swe.sh](../integration/verl/examples/run_swe.sh) with [runtime-env-swe.yaml](../integration/verl/examples/runtime-env-swe.yaml):
+Ready to run: [run_swe.sh](../../integration/verl/examples/run_swe.sh) with [runtime-env-swe.yaml](../../integration/verl/examples/runtime-env-swe.yaml):
 
 ```bash
 ray job submit --address http://localhost:8265 \
@@ -246,9 +246,9 @@ Long-context notes: enable `use_remove_padding`, sequence parallelism if 32k con
 The point of this exercise for the repo: quantify prefix-aware routing on a real agentic RL workload. Run A/B at identical config:
 
 - **Baseline**: drop the `agent_loop_manager_class` override → verl's native load balancer (sticky least-loaded).
-- **Treatment**: scheduler hook with a profile weighting `prefix_cache` (see [scheduler.yaml](../integration/verl/examples/scheduler.yaml); tune weights per the [customization guide](./scheduler_customization.md)).
+- **Treatment**: scheduler hook with a profile weighting `prefix_cache` (see [scheduler.yaml](../../integration/verl/examples/scheduler.yaml); tune weights per the [customization guide](./scheduler_customization.md)).
 
-Compare, per step (all already emitted — see the [integration README log reference](../integration/verl/README.md#4-verifying-results-step-4)):
+Compare, per step (all already emitted — see the [integration README log reference](../../integration/verl/README.md#4-verifying-results-step-4)):
 
 - `timing_s/gen` and `perf/throughput` — rollout wall clock / sampling throughput (headline number)
 - `timing_s/agent_loop/slowest/generate_sequences` — tail latency, where sampler imbalance shows up
@@ -269,7 +269,7 @@ Compare, per step (all already emitted — see the [integration README log refer
 
 ## Version compatibility
 
-The hook supports **verl v0.7.1 (legacy) and v0.9.x (modern) layouts, auto-detected at import** ([compat notice](../integration/verl/README.md#compatibility-notice)). The modern port was required because 0.9.x moved routing into a `GlobalRequestLoadBalancer` Ray actor (`verl/workers/rollout/llm_server.py`) that owns the server registry; the hook's client bootstraps its endpoint set by draining the balancer once at first use, then routes via the scheduler engine with verl's LB as fallback. Validated GPU-free on the cluster's **0.9.0.dev** build by [hook_compat_check.py](../integration/verl/hook_compat_check.py) — PASS: 3 endpoints bootstrapped, all same-prefix requests prefix-routed to one server, inflight and LB counters clean. The **SWEAgentLoop is likewise verified against 0.9.0.dev** ([integration_check.py](../integration/verl/swe/integration_check.py)) and tolerates older builds where `generate` returned a bare token list. One robustness fix that came out of this: the vLLM/SGLang engine patches now skip on *any* import failure, not just ImportError — CPU-only nodes (the Ray head) raise `AttributeError` from triton during vLLM import.
+The hook supports **verl v0.7.1 (legacy) and v0.9.x (modern) layouts, auto-detected at import** ([compat notice](../../integration/verl/README.md#compatibility-notice)). The modern port was required because 0.9.x moved routing into a `GlobalRequestLoadBalancer` Ray actor (`verl/workers/rollout/llm_server.py`) that owns the server registry; the hook's client bootstraps its endpoint set by draining the balancer once at first use, then routes via the scheduler engine with verl's LB as fallback. Validated GPU-free on the cluster's **0.9.0.dev** build by [hook_compat_check.py](../../integration/verl/hook_compat_check.py) — PASS: 3 endpoints bootstrapped, all same-prefix requests prefix-routed to one server, inflight and LB counters clean. The **SWEAgentLoop is likewise verified against 0.9.0.dev** ([integration_check.py](../../integration/verl/swe/integration_check.py)) and tolerates older builds where `generate` returned a bare token list. One robustness fix that came out of this: the vLLM/SGLang engine patches now skip on *any* import failure, not just ImportError — CPU-only nodes (the Ray head) raise `AttributeError` from triton during vLLM import.
 
 ## Prior art
 

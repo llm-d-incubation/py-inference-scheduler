@@ -45,7 +45,7 @@ This integration follows and has been tested against slime's
 The routing policy lives in [`examples/scheduler.yaml`](./examples/scheduler.yaml) (default
 `backpressure`: prefix-cache affinity + queue/KV-pressure load balancing). This project isn't
 packaged yet, so to customize it just **edit that file directly** inside your VM and restart the router. See the
-[Scheduler Customization Guide](../../docs/scheduler_customization.md) for the available scorers,
+[Scheduler Customization Guide](../../docs/guides/scheduler_customization.md) for the available scorers,
 pickers, and flow-control plugins.
 
 ## Running a Training Job (Step 3)

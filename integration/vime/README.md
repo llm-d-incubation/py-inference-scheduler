@@ -18,7 +18,7 @@ Key components:
 - [server.py](./server.py): the router — worker registry + the scheduled `/inference/v1/generate` proxy
   (reuses slime's shared router core).
 - [`__main__.py`](./__main__.py): the `python -m integration.vime` launcher.
-- [datalayer/metrics/vime/](../../datalayer/metrics/vime): per-request vLLM Prometheus `/metrics` scrape.
+- [datalayer/metrics/vime/](../../src/py_inference_scheduler/datalayer/metrics/vime): per-request vLLM Prometheus `/metrics` scrape.
 
 ---
 
@@ -43,7 +43,7 @@ non-scheduler steps, follow the guide as directed:
 
 The routing policy reuses slime's [`examples/scheduler.yaml`](../slime/examples/scheduler.yaml) (the scorers
 are engine-agnostic). Edit that file directly to customize, or pass `--config /path/to/your.yaml`. See the
-[Scheduler Customization Guide](../../docs/scheduler_customization.md).
+[Scheduler Customization Guide](../../docs/guides/scheduler_customization.md).
 
 ## Running a Training Job (Step 3)
 
