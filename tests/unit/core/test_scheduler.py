@@ -120,3 +120,45 @@ def test_filter_scorer_picker_combined():
     chosen = pr.endpoint_list[0].endpoint
     # pod2 has the smallest queue size, but is in the wrong zone, so pod 1 should be chosen
     assert chosen.name == "pod1"
+
+
+@pytest.mark.parametrize("replacement", [None, "profiles: [", "profiles: {}"])
+def test_reload_error_keeps_last_valid_config(tmp_path, caplog, replacement):
+    import os
+
+    config_path = tmp_path / "scheduler.yaml"
+    config = (
+        "profile_handler:\n  type: single_profile\n"
+        "profiles:\n  default:\n    filters:\n"
+        "      - type: simple\n        key: zone\n        value: a\n"
+    )
+    config_path.write_text(config, encoding="utf-8")
+    scheduler = Scheduler(config_path=str(config_path))
+    request = LLMRequest(request_id="r", target_model=None)
+    candidates = [
+        Endpoint(name="a", attributes={"zone": "a"}),
+        Endpoint(name="b", attributes={"zone": "b"}),
+    ]
+    assert scheduler.run(request, candidates)[0].endpoint.name == "a"
+
+    if replacement is None:
+        config_path.unlink()
+    else:
+        config_path.write_text(replacement, encoding="utf-8")
+        os.utime(config_path, (scheduler.last_mtime + 1, scheduler.last_mtime + 1))
+    assert scheduler.run(request, candidates)[0].endpoint.name == "a"
+    assert "keeping the last valid configuration" in caplog.text
+
+    config_path.write_text(config.replace("value: a", "value: b"), encoding="utf-8")
+    os.utime(config_path, (scheduler.last_mtime + 2, scheduler.last_mtime + 2))
+    assert scheduler.run(request, candidates)[0].endpoint.name == "b"
+
+
+@pytest.mark.parametrize("content", [None, "profiles: {}"])
+def test_initial_config_error_is_not_suppressed(tmp_path, content):
+    config_path = tmp_path / "scheduler.yaml"
+    if content is not None:
+        config_path.write_text(content, encoding="utf-8")
+    scheduler = Scheduler(config_path=str(config_path))
+    with pytest.raises((FileNotFoundError, ValueError)):
+        scheduler.run(LLMRequest(request_id="r", target_model=None), [Endpoint(name="a")])

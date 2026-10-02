@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import pathlib
 from typing import Sequence
@@ -33,8 +34,16 @@ from py_inference_scheduler.framework import (
     ScoredEndpoint,
 )
 
+logger = logging.getLogger(__name__)
+
 
 class Scheduler:
+    """Route requests using the latest successfully loaded configuration.
+
+    Failed file reloads retain the previous configuration and are retried on the
+    next request. Initial configuration errors still propagate to the caller.
+    """
+
     config_path: str | None
     last_mtime: float
     profile_handler: ProfileHandler
@@ -94,7 +103,16 @@ class Scheduler:
     def schedule(
         self, request: LLMRequest, candidates: Sequence[Endpoint]
     ) -> SchedulingResult:
-        self._maybe_reload_config()
+        try:
+            self._maybe_reload_config()
+        except Exception:
+            if not hasattr(self, "profiles") or not hasattr(self, "profile_handler"):
+                raise
+            logger.warning(
+                "Failed to reload scheduler config from %s; keeping the last valid configuration",
+                self.config_path,
+                exc_info=True,
+            )
         if not candidates:
             raise ValueError("no scheduling candidates provided")
 
