@@ -77,6 +77,19 @@ Filters eliminate replicas based on hard rules.
 *   **`simple`**: Keeps only replicas that have a specific attribute matching a target value.
     *   `key` (string, required): The attribute key to check (e.g., `"model_name"`).
     *   `value` (object, optional): The value to match. If omitted, it acts as a no-op.
+*   **`saturation`**: Drops replicas whose KV cache utilization or waiting request count is at or above its threshold. Reads `kv` and `num_waiting_reqs` from the endpoint's `routing_stats` attribute; missing statistics default to zero.
+    *   `kv_threshold` (float, default: `0.95`): KV cache utilization threshold, in `(0, 1]`.
+    *   `waiting_threshold` (int, default: `16`): Waiting request count threshold; must be positive.
+    *   If every replica is saturated, the filter returns the original candidate set so scheduling can continue. Use the `kv_saturation` flow control plugin when requests should wait for capacity instead.
+
+For example, add the filter to a profile with:
+
+```yaml
+filters:
+  - type: saturation
+    kv_threshold: 0.95
+    waiting_threshold: 16
+```
 
 ### Scorers
 Scorers assign scores to replicas. Multiple scorers are normalized and weighted.
