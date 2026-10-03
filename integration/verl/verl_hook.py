@@ -109,8 +109,25 @@ class _SchedulerCore:
             if not selected:
                 return None
             winner: Endpoint = selected[0].endpoint
-            self.inflight_store.increment(winner.name)
+            self.note_dispatch(winner.name)
             return winner
+
+    def note_dispatch(self, endpoint_name: str) -> None:
+        """Count a dispatch and publish the new count on the endpoint at once."""
+        self.inflight_store.increment(endpoint_name)
+        self._publish_inflight(endpoint_name)
+
+    def release(self, endpoint_name: str) -> None:
+        self.inflight_store.decrement(endpoint_name)
+        self._publish_inflight(endpoint_name)
+
+    def _publish_inflight(self, endpoint_name: str) -> None:
+        # queue_len is otherwise rewritten only by a metrics refresh, so any
+        # decision that runs before the next refresh must still see this one.
+        for ep in self.endpoints:
+            if ep.name == endpoint_name:
+                ep.attributes["queue_len"] = self.inflight_store.get(endpoint_name)
+                return
 
 
 if _VERL_LAYOUT == "legacy":
@@ -146,12 +163,12 @@ if _VERL_LAYOUT == "legacy":
                 )
                 self.core.lb_acquired_requests.add(request_id)
                 server_id, handle = await super()._acquire_server(request_id)  # type: ignore[no-any-return]
-                self.core.inflight_store.increment(server_id)
+                self.core.note_dispatch(server_id)
                 return server_id, handle
             return winner.name, winner.attributes["replica_obj"]
 
         def _release_server(self, server_id: str, request_id: str | None = None) -> None:
-            self.core.inflight_store.decrement(server_id)
+            self.core.release(server_id)
             if request_id and request_id in self.core.lb_acquired_requests:
                 super()._release_server(server_id)
                 self.core.lb_acquired_requests.remove(request_id)
@@ -262,12 +279,12 @@ else:  # modern layout
                 )
                 self.core.lb_acquired_requests.add(request_id)
                 server_id, handle = await super()._acquire_server(request_id)
-                self.core.inflight_store.increment(server_id)
+                self.core.note_dispatch(server_id)
                 return server_id, handle
             return winner.name, winner.attributes["replica_obj"]
 
         def _release_server(self, server_id: str, request_id: str | None = None) -> None:
-            self.core.inflight_store.decrement(server_id)
+            self.core.release(server_id)
             if request_id and request_id in self.core.lb_acquired_requests:
                 super()._release_server(server_id)
                 self.core.lb_acquired_requests.remove(request_id)
