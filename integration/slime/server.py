@@ -138,6 +138,10 @@ async def schedule_and_proxy(  # noqa: PLR0913
             return JSONResponse(status_code=503, content={"error": "no worker selected"})
         winner = selected[0].endpoint
         inflight.increment(winner.name)
+        # The poller republishes queue_len only every metrics interval; every
+        # decision taken before its next tick would otherwise score the same
+        # snapshot and send a whole burst to the engine it ranks lowest.
+        winner.attributes["queue_len"] = inflight.get(winner.name)
 
     worker_url = str(winner.attributes["url"])
     # Forward client headers to the worker, minus hop-by-hop ones aiohttp resets itself.
@@ -154,6 +158,7 @@ async def schedule_and_proxy(  # noqa: PLR0913
         return JSONResponse(status_code=502, content={"error": "worker request failed"})
     finally:
         inflight.decrement(winner.name)
+        winner.attributes["queue_len"] = inflight.get(winner.name)
 
 
 def _routing_body(body: dict) -> object:
