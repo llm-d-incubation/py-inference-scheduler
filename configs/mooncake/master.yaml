@@ -1,0 +1,100 @@
+# Copyright 2026 llm-d
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Mooncake Store master (control-plane only; never on the data path).
+# One per cluster. Owns membership, allocation, and the lease/eviction policy.
+# vLLM replicas connect to it at master_server_address (see client-config.yaml).
+#
+# Runs the SAME image as the Ray Serve workers (configs/mooncake/worker.Dockerfile)
+# with the command overridden to mooncake_master — one artifact, and the master
+# and every replica client are guaranteed the same mooncake wheel. Cost: a large
+# one-time image pull onto the CPU node. If that ever matters, the light
+# alternative is a dedicated image (python:3.12-slim + the same pinned
+# mooncake-transfer-engine wheel) kept in version lockstep manually.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mooncake-master
+  namespace: default
+  labels:
+    app: mooncake-master
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mooncake-master
+  template:
+    metadata:
+      labels:
+        app: mooncake-master
+    spec:
+      # Control-plane only: schedule on the CPU/default pool, not the GPU nodes.
+      nodeSelector:
+        cloud.google.com/gke-nodepool: default-pool
+      containers:
+      - name: mooncake-master
+        image: <your-registry>/ray-llm-mooncake:2.56.0  # REPLACE: build from worker.Dockerfile
+        imagePullPolicy: Always
+        command: ["mooncake_master"]
+        args:
+        - "--port"
+        - "50051"
+        - "--enable_http_metadata_server"
+        - "--http_metadata_server_port"
+        - "8080"
+        # Touch-lease must outlive the slowest KV batch transfer or reads die
+        # mid-flight with LEASE_EXPIRED (-707) and vllm fails the request
+        # (proven under concurrent load on the tcp testbed; upstream's 5s is
+        # sized for rdma-speed handoffs). 60s covers congested-tcp batches;
+        # harmless for rdma. Part 2's advisor supersedes this with pinning.
+        - "--default_kv_lease_ttl"
+        - "60000"
+        ports:
+        - containerPort: 50051
+          name: rpc
+        - containerPort: 8080
+          name: metadata
+        - containerPort: 9003
+          name: metrics
+        # Sized to fit the default-pool's e2-medium nodes (~0.9 CPU allocatable).
+        # The master is control-plane only (never on the data path); bump these
+        # if you move it to a larger pool.
+        resources:
+          requests:
+            cpu: "500m"
+            memory: "1Gi"
+          limits:
+            cpu: "500m"
+            memory: "1Gi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mooncake-master
+  namespace: default
+  labels:
+    app: mooncake-master
+spec:
+  selector:
+    app: mooncake-master
+  ports:
+  - name: rpc
+    port: 50051
+    targetPort: 50051
+  - name: metadata
+    port: 8080
+    targetPort: 8080
+  - name: metrics
+    port: 9003
+    targetPort: 9003
