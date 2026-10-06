@@ -106,6 +106,15 @@ If you want to customize the scheduler settings in a VM-based cluster:
 > [!TIP]
 > **Designing Custom Profiles**: To learn more about the available scorers, filters, pickers, and flow-control plugins you can use to customize your scheduling policies, refer to the comprehensive [Scheduler Customization Guide](../../docs/guides/scheduler_customization.md).
 
+### Keeping a trajectory on one engine
+verl reuses one request id for every turn of a trajectory, and the hook passes it to the scheduler as the `x-rls-session` header. To send a trajectory's turns back to the engine that holds its context, add `sticky_session` to the profile:
+```yaml
+scorers:
+  - type: sticky_session
+    header_name: x-rls-session
+    weight: 10.0   # above the sum of the other scorers' weights, so the session wins
+```
+
 ---
 
 ## Running a Training Job (Step 3)
