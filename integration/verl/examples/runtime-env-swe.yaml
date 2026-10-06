@@ -7,7 +7,6 @@ pip:
   - "kubernetes"   # SWEAgentLoop manages agent-sandbox pods
 env_vars:
   PYTHONPATH: ".:src"   # repo root (integration/, backends/) + src layout (py_inference_scheduler)
-  PROMETHEUS_MULTIPROC_DIR: "/tmp/metrics"
   ROUTER_CONFIG_PATH: "/etc/scheduler/scheduler.yaml"
   SWE_SANDBOX_NAMESPACE: "agents-system"
   SWE_CMD_TIMEOUT_S: "60"

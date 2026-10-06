@@ -4,7 +4,6 @@ pip:
   - "verl==0.7.1"
 
 env_vars:
-  PROMETHEUS_MULTIPROC_DIR: "/tmp/metrics"
   PYTHONPATH: "."
   ROUTER_CONFIG_PATH: "./integration/verl/examples/scheduler.yaml"
   NCCL_DEBUG: "INFO"

@@ -65,10 +65,7 @@ Before deep-diving into logs, verify the environment meets these requirements:
         2. Whether `servers` is passed as a list of raw handles or `(id, handle)` tuples.
         You must then adapt the overrides in [verl_hook.py](../../../integration/verl/verl_hook.py) to match those exact signatures.
 2.  **Supported Images**: `verlai/verl:vllm011.latest` or `verlai/verl:sgl059.latest`.
-3.  **Shared Metrics Directory**: 
-    - **K8s**: An `emptyDir` volume must be mounted at `/tmp/metrics` on **both** head and worker pods.
-    - **VM**: `/tmp/metrics` must exist and be writable by Ray on all nodes.
-4.  **ConfigMap (K8s Only)**: The `scheduler-config` ConfigMap must be applied *before* the Ray cluster is deployed.
+3.  **ConfigMap (K8s Only)**: The `scheduler-config` ConfigMap must be applied *before* the Ray cluster is deployed.
 
 ---
 
@@ -100,7 +97,7 @@ Follow this progressive diagnostic tree to isolate and fix the exact failure poi
 
 ### Step 4.4: Are metrics missing or stuck at 0? (Scraping Phase)
 *   **Symptom**: `routing_stats` in logs show 0 waiting/running requests, or KV cache usage is always 0.
-*   **Diagnostic 1 (Check Env Vars)**: Verify `PROMETHEUS_MULTIPROC_DIR: "/tmp/metrics"` is set in `runtime-env.yaml`. If missing, Prometheus cannot aggregate metrics across multiproc workers.
+*   **Diagnostic 1 (Check Env Vars)**: Verify `PROMETHEUS_MULTIPROC_DIR` is **not** set in `runtime-env.yaml` or the pod env. vLLM serves each engine's `/metrics` from its own registry; a directory shared by the engines on a node makes every `/metrics` report the node aggregate, so every engine shows the same load.
 *   **Diagnostic 2 (Test Local Scrape)**: Exec into a worker pod and run `curl http://localhost:{port}/metrics` (find port in worker logs).
     *   *If connection refused*: The engine's Prometheus server is not running (verify SGLang prometheus flag is enabled).
     *   *If 200 OK but metrics missing in scheduler*: The monkey patch did not apply. Verify `verl_hook.py` is being loaded and `apply()` is called.
