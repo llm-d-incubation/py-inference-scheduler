@@ -19,9 +19,9 @@ Supports two verl layouts, auto-detected at import time:
   ``verl.experimental.agent_loop.agent_loop`` and owns the server list.
 - **modern** (v0.9.x): ``LLMServerClient`` lives in
   ``verl.workers.rollout.llm_server``; a ``GlobalRequestLoadBalancer`` Ray
-  actor owns the server registry and does atomic acquire. The scheduler client
-  bootstraps its endpoint set by draining the balancer once at first use
-  (acquire every server with unique request ids, record the handles, release).
+  actor owns the server registry and does atomic acquire. The fleet actor
+  (fleet.py) recovers the engine handles by draining the balancer once for
+  every worker.
 
 Both layouts expose the same entrypoint for the trainer flag:
 ``+actor_rollout_ref.rollout.agent.agent_loop_manager_class=integration.verl.verl_hook.PyInferenceAgentLoopManager``
@@ -60,9 +60,8 @@ except ImportError:  # modern layout (verl v0.9.x)
 
 from backends.verl.sglang import SglangEnginePatch
 from backends.verl.vllm import VllmEnginePatch
+from integration.verl.fleet import FleetSnapshot, fleet_actor
 from py_inference_scheduler import Scheduler
-from py_inference_scheduler.datalayer.metrics.datastore import InflightStore
-from py_inference_scheduler.datalayer.metrics.verl.fetch_metrics import fetch_worker_metrics
 from py_inference_scheduler.framework import Endpoint, LLMRequest
 
 logger = logging.getLogger(__name__)
@@ -81,36 +80,49 @@ def _rollout_config(config: DictConfig):
 
 
 class _SchedulerCore:
-    """Layout-independent scheduling state: engine, inflight tracking, metrics."""
+    """Per-worker routing on state shared by the whole fleet.
+
+    - Reads engine metrics and fleet-wide in-flight counts from the fleet actor once per decision.
+    - Holds a lock so a decision and the dispatch it counts never interleave with another.
+    """
 
     def __init__(self) -> None:
         self.scheduler = Scheduler()
-        self.inflight_store = InflightStore()
+        self.fleet = fleet_actor()
         self.endpoints: list[Endpoint] = []
         self.lb_acquired_requests: set[str] = set()
         self.lock = asyncio.Lock()
 
+    def set_endpoints(self, handles: dict[str, ray.actor.ActorHandle]) -> None:
+        if set(handles) != {ep.name for ep in self.endpoints}:
+            self.endpoints = [
+                Endpoint(name=name, attributes={"replica_obj": handle, "routing_stats": {}})
+                for name, handle in handles.items()
+            ]
+
     async def schedule(self, request_id: str, prompt_ids: list[int] | None) -> Endpoint | None:
-        """Refresh metrics and pick an endpoint; None means fall back to verl's LB.
-
-        The lock makes metric refresh part of the scheduling task itself:
-        verl composes the whole batch before any task runs, so an independent
-        poller task would never be interleaved by the FIFO event loop.
-        """
+        """Pick an endpoint on the latest fleet snapshot; None means fall back to verl's LB."""
         async with self.lock:
-            await asyncio.gather(
-                *(fetch_worker_metrics(ep, self.inflight_store) for ep in self.endpoints)
-            )
-            for ep in self.endpoints:
-                ep.attributes["queue_len"] = self.inflight_store.get(ep.name)
-
+            # Ray runs one caller's actor calls in order, so this worker's last
+            # dispatch is already counted in the snapshot.
+            snapshot: FleetSnapshot = await self.fleet.snapshot.remote()
+            endpoints = self.endpoints
+            for ep in endpoints:
+                ep.attributes["routing_stats"] = snapshot.stats.get(ep.name, {})
+                ep.attributes["queue_len"] = snapshot.inflight.get(ep.name, 0)
             request = LLMRequest(request_id=request_id, body=prompt_ids)
-            selected = self.scheduler.run(request, candidates=self.endpoints)
+            selected = self.scheduler.run(request, candidates=endpoints)
             if not selected:
                 return None
             winner: Endpoint = selected[0].endpoint
-            self.inflight_store.increment(winner.name)
+            self.note_dispatch(winner.name)
             return winner
+
+    def note_dispatch(self, endpoint_name: str) -> None:
+        self.fleet.increment.remote(endpoint_name)
+
+    def release(self, endpoint_name: str) -> None:
+        self.fleet.decrement.remote(endpoint_name)
 
 
 if _VERL_LAYOUT == "legacy":
@@ -129,10 +141,8 @@ if _VERL_LAYOUT == "legacy":
             super().__init__(config, servers, load_balancer_handle, *args, **kwargs)
             self.rollout_config = _rollout_config(config)
             self.core = _SchedulerCore()
-            self.core.endpoints = [
-                Endpoint(name=server_id, attributes={"replica_obj": handle, "routing_stats": {}})
-                for server_id, handle in servers
-            ]
+            self.core.set_endpoints(dict(servers))
+            self.core.fleet.watch.remote(dict(servers))
 
         async def _acquire_server(
             self,
@@ -146,12 +156,12 @@ if _VERL_LAYOUT == "legacy":
                 )
                 self.core.lb_acquired_requests.add(request_id)
                 server_id, handle = await super()._acquire_server(request_id)  # type: ignore[no-any-return]
-                self.core.inflight_store.increment(server_id)
+                self.core.note_dispatch(server_id)
                 return server_id, handle
             return winner.name, winner.attributes["replica_obj"]
 
         def _release_server(self, server_id: str, request_id: str | None = None) -> None:
-            self.core.inflight_store.decrement(server_id)
+            self.core.release(server_id)
             if request_id and request_id in self.core.lb_acquired_requests:
                 super()._release_server(server_id)
                 self.core.lb_acquired_requests.remove(request_id)
@@ -209,10 +219,8 @@ else:  # modern layout
     class InferenceSchedulerServerClient(_ModernServerClient):  # type: ignore[misc]
         """Delegate routing to py-inference-scheduler. Compatible with verl v0.9.x.
 
-        The GlobalRequestLoadBalancer actor owns the (server_id -> handle)
-        registry but exposes no enumeration API, so the endpoint set is
-        bootstrapped once by draining it: with all inflight counters equal,
-        consecutive acquires with unique request ids visit every server.
+        verl's balancer owns the engine registry but enumerates only ids; the
+        fleet actor recovers the handles once for every worker.
         """
 
         def __init__(
@@ -224,30 +232,15 @@ else:  # modern layout
             super().__init__(config, load_balancer_handle, **kwargs)
             self.rollout_config = _rollout_config(config)
             self.core = _SchedulerCore()
+            self._view_complete = False
 
         async def _ensure_endpoints(self) -> None:
-            if self.core.endpoints:
+            if self._view_complete:
                 return
             server_ids = await self._load_balancer.get_all_servers.remote()
-            handles: dict[str, ray.actor.ActorHandle] = {}
-            acquired: list[str] = []
-            for _ in range(max(1, len(server_ids)) * 3):
-                server_id, handle = await self._load_balancer.acquire_server.remote(
-                    request_id=f"pyis-bootstrap-{uuid.uuid4().hex}"
-                )
-                acquired.append(server_id)
-                handles[server_id] = handle
-                if len(handles) >= len(server_ids):
-                    break
-            for server_id in acquired:
-                self._load_balancer.release_server.remote(server_id=server_id)
-            self.core.endpoints = [
-                Endpoint(name=server_id, attributes={"replica_obj": handle, "routing_stats": {}})
-                for server_id, handle in handles.items()
-            ]
-            logger.info(
-                "py-inference-scheduler bootstrapped %d endpoints from global LB", len(handles)
-            )
+            handles = await self.core.fleet.discover.remote(self._load_balancer, len(server_ids))
+            self.core.set_endpoints(handles)
+            self._view_complete = len(handles) >= len(server_ids)
 
         async def _acquire_server(
             self,
@@ -262,12 +255,12 @@ else:  # modern layout
                 )
                 self.core.lb_acquired_requests.add(request_id)
                 server_id, handle = await super()._acquire_server(request_id)
-                self.core.inflight_store.increment(server_id)
+                self.core.note_dispatch(server_id)
                 return server_id, handle
             return winner.name, winner.attributes["replica_obj"]
 
         def _release_server(self, server_id: str, request_id: str | None = None) -> None:
-            self.core.inflight_store.decrement(server_id)
+            self.core.release(server_id)
             if request_id and request_id in self.core.lb_acquired_requests:
                 super()._release_server(server_id)
                 self.core.lb_acquired_requests.remove(request_id)
@@ -334,5 +327,7 @@ class PyInferenceAgentLoopManager(AgentLoopManager):
     """
 
     def __init__(self, *args: object, **kwargs: object) -> None:
+        # Ray ties an actor's life to its creator: created here, the fleet outlives any one worker.
+        self._rls_fleet = fleet_actor()
         self.agent_loop_workers_class = ray.remote(PyInferenceAgentLoopWorker)
         super().__init__(*args, **kwargs)
