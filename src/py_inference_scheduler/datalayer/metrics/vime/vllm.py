@@ -19,7 +19,6 @@ from typing import Any
 
 import aiohttp
 
-from py_inference_scheduler.datalayer.metrics.datastore import InflightStore
 from py_inference_scheduler.datalayer.metrics.prometheus import empty_vllm_stats, parse_vllm
 from py_inference_scheduler.framework import Endpoint
 
@@ -44,12 +43,8 @@ async def scrape_vllm_metrics(
         return stats
 
 
-async def fetch_worker_metrics(
-    ep: Endpoint, inflight_store: InflightStore, session: aiohttp.ClientSession
-) -> None:
+async def fetch_worker_metrics(ep: Endpoint, session: aiohttp.ClientSession) -> None:
     url = ep.attributes.get("url")
     if not url:
         return
-    stats = await scrape_vllm_metrics(str(url), session)
-    ep.attributes["queue_len"] = inflight_store.get(ep.name)
-    ep.attributes["routing_stats"] = stats
+    ep.attributes["routing_stats"] = await scrape_vllm_metrics(str(url), session)
