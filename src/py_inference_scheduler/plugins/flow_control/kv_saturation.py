@@ -14,8 +14,8 @@
 
 from __future__ import annotations
 
-import time
-from typing import Any, Sequence
+from collections import OrderedDict
+from typing import NamedTuple, Sequence
 
 from py_inference_scheduler.framework import (
     Endpoint,
@@ -23,154 +23,111 @@ from py_inference_scheduler.framework import (
     LLMRequest,
     register_flow_control,
 )
+from py_inference_scheduler.framework.helpers import prefill_tokens
+
+# Far more trajectories than one rollout holds.
+_MAX_REMEMBERED_TRAJECTORIES = 65536
+
+
+class _Reservation(NamedTuple):
+    """Tokens an admitted, unfinished request has booked on one engine."""
+
+    engine: str
+    tokens: int
+
+
+class _LastTurn(NamedTuple):
+    """Where a trajectory's last turn ran and how many tokens it generated."""
+
+    engine: str
+    output_tokens: int
 
 
 @register_flow_control("kv_saturation")
 class KVSaturationPlugin(FlowControlPlugin):
-    def __init__(self, **config: Any) -> None:  # noqa: ANN401
-        self.config = config
-        # rollout_request_id -> {isl, max_osl}
-        self._rollout_request_stats: dict[str, dict[str, int]] = {}
-        # replica_id -> token_usage_at_replica
-        self._replica_token_usage: dict[str, int] = {}
-        # request_id -> (replica_id, tokens)
-        self._request_at_replica: dict[str, tuple[str, int]] = {}
-        # request_id -> set of budgeted requests
-        self._budgeted_requests: set[str] = set()
-        self._last_drip_at = 0.0
+    """Admits a request only where its tokens fit in an engine's KV budget.
+
+    - A request needs its prompt plus its trajectory's last output, or default_osl on turn one.
+    - An engine's budget is budget_fraction of its KV capacity, minus what admitted, unfinished
+      requests reserved.
+    - Offers the engine that served the trajectory's last turn if it fits, otherwise every engine
+      that fits.
+    - Offers nothing when no engine fits, so the caller queues the request.
+    """
+
+    def __init__(self, default_osl: int = 1024, budget_fraction: float = 1.0) -> None:
+        if default_osl < 0:
+            raise ValueError("default_osl must be >= 0.")
+        if not 0 < budget_fraction <= 1:
+            raise ValueError("budget_fraction must be in (0, 1].")
+        self.default_osl = default_osl
+        self.budget_fraction = budget_fraction
+        self._reserved_by_engine: dict[str, int] = {}
+        self._reservations: dict[str, _Reservation] = {}
+        self._last_turns: OrderedDict[str, _LastTurn] = OrderedDict()
 
     def get_allowed_candidates(
         self, request: LLMRequest, candidates: Sequence[Endpoint]
     ) -> Sequence[Endpoint]:
-        fc = self.config
-
-        if request.request_id in self._budgeted_requests:
-            return candidates
-
-        rollout_id, char_len = self._get_rollout_request_id(request.body)
-        tokens_required = self._estimate_tokens_required(rollout_id, char_len, fc)
-
-        allowed = []
-        for c in candidates:
-            kv_cache_size = c.attributes.get("kv_cache_size", -1)
-            if kv_cache_size <= 0:  # type: ignore[operator]
-                continue
-
-            current_usage = self._replica_token_usage.get(c.name, 0)
-            if current_usage + tokens_required <= kv_cache_size:  # type: ignore[operator]
-                allowed.append(c)
-
-        if allowed:
-            return allowed
-
-        return self._get_drip_candidates(candidates, fc)
-
-    def _get_drip_candidates(self, candidates: Sequence[Endpoint], fc: dict) -> Sequence[Endpoint]:
-        enable_drip = fc.get("enable_drip", False)
-        if not enable_drip:
-            return []
-
-        drip_threshold_kv = fc.get("drip_threshold_kv", 0.1)
-        now = time.time()
-        drip_interval_s = fc.get("drip_interval_s", 2.0)
-        if (now - self._last_drip_at) >= drip_interval_s:
-            for c in candidates:
-                routing_stats = c.attributes.get("routing_stats", {})
-                physical_kv = routing_stats.get("kv", 1.0)  # type: ignore[attr-defined]
-                if physical_kv < drip_threshold_kv:
-                    self._last_drip_at = now
-                    print(f"[BUDGET] Drip Admission to {c.name} (Physical KV: {physical_kv:.2f})")
-                    return [c]
-        return []
+        if candidates and all(_reports_no_capacity(ep) for ep in candidates):
+            raise RuntimeError("No engine reports its KV capacity, which kv_saturation needs.")
+        need = self._need(request)
+        fitting = [ep for ep in candidates if self._fits(ep, need, request.request_id)]
+        last = self._last_turns.get(request.request_id)
+        home = [ep for ep in fitting if last and ep.name == last.engine]
+        return home or fitting
 
     def reserve(self, request: LLMRequest, selected: Endpoint) -> None:
-        fc = self.config
+        # Ray Serve routes a request again when a replica turns it away. Drop the old reservation
+        # first so the request is never booked on two engines.
+        self._drop_reservation(request.request_id)
+        engine = selected.name
+        tokens = min(self._need(request), self._budget(selected))
+        self._reserved_by_engine[engine] = self._reserved_by_engine.get(engine, 0) + tokens
+        self._reservations[request.request_id] = _Reservation(engine, tokens)
 
-        if request.request_id in self._budgeted_requests:
+    def release(
+        self, request: LLMRequest, endpoint_name: str, output_tokens: int | None = None
+    ) -> None:
+        engine = self._drop_reservation(request.request_id)
+        if engine is None or output_tokens is None:
             return
+        self._last_turns[request.request_id] = _LastTurn(engine, output_tokens)
+        self._last_turns.move_to_end(request.request_id)
+        if len(self._last_turns) > _MAX_REMEMBERED_TRAJECTORIES:
+            self._last_turns.popitem(last=False)
 
-        rollout_id, char_len = self._get_rollout_request_id(request.body)
-        tokens_required = self._estimate_tokens_required(rollout_id, char_len, fc)
+    def _drop_reservation(self, request_id: str) -> str | None:
+        reservation = self._reservations.pop(request_id, None)
+        if reservation is None:
+            return None
+        self._reserved_by_engine[reservation.engine] -= reservation.tokens
+        return reservation.engine
 
-        self._replica_token_usage[selected.name] = (
-            self._replica_token_usage.get(selected.name, 0) + tokens_required
-        )
-        self._request_at_replica[request.request_id] = (
-            selected.name,
-            tokens_required,
-        )
-        self._budgeted_requests.add(request.request_id)
-        print(
-            f"[BUDGET] Admission committed for req={request.request_id} to replica={selected.name} "
-            f"(New Usage: {self._replica_token_usage[selected.name]})"
-        )
+    def _need(self, request: LLMRequest) -> int:
+        last = self._last_turns.get(request.request_id)
+        output = last.output_tokens if last else self.default_osl
+        return prefill_tokens(request.body) + output
 
-    def release(self, request: LLMRequest, endpoint_name: str) -> None:
-        if request.request_id in self._request_at_replica:
-            replica_id_to_reclaim, tokens = self._request_at_replica.pop(request.request_id)
-            self._replica_token_usage[replica_id_to_reclaim] = max(
-                0,
-                self._replica_token_usage.get(replica_id_to_reclaim, 0) - tokens,
-            )
-            print(
-                f"[BUDGET] Released req={request.request_id} from replica={replica_id_to_reclaim} "
-                f"(New Usage: {self._replica_token_usage[replica_id_to_reclaim]})"
-            )
-            self._budgeted_requests.discard(request.request_id)
+    def _fits(self, ep: Endpoint, need: int, request_id: str) -> bool:
+        budget = self._budget(ep)
+        # A request routed again must not compete with its own old reservation.
+        reservation = self._reservations.get(request_id)
+        own = reservation.tokens if reservation and reservation.engine == ep.name else 0
+        reserved = self._reserved_by_engine.get(ep.name, 0) - own
+        # An oversize request reserves the whole budget, so it waits for an idle engine.
+        return budget > 0 and reserved + min(need, budget) <= budget
 
-    def update_learned_stats(self, rollout_request_id: str, isl: int, osl: int) -> None:
-        self._rollout_request_stats[rollout_request_id] = {
-            "isl": isl,
-            "osl": osl,
-        }
-        print(f"[BUDGET] Learned stats for rollout={rollout_request_id}: ISL={isl}, OSL={osl}")
+    def _budget(self, ep: Endpoint) -> int:
+        return int(_capacity(ep) * self.budget_fraction)
 
-    def _get_rollout_request_id(self, body: Any) -> tuple[str, int]:  # noqa: ANN401
-        import struct
-        import uuid
 
-        NAMESPACE_FOR_UUID = uuid.uuid5(uuid.NAMESPACE_DNS, "llmd.inference.scheduler")  # noqa: N806
+def _capacity(ep: Endpoint) -> int:
+    value = ep.attributes.get("kv_cache_size")
+    return int(value) if isinstance(value, (int, float)) else 0
 
-        if not body:
-            return "", 0
 
-        try:
-            if isinstance(body, list) and len(body) > 0 and isinstance(body[0], int):
-                prompt_bytes = struct.pack(f"{len(body)}i", *body)
-                return (
-                    uuid.uuid5(NAMESPACE_FOR_UUID, prompt_bytes.hex()).hex,
-                    len(body) * 4,
-                )
-
-            if isinstance(body, (str, bytes)):
-                prompt_str = body if isinstance(body, str) else body.hex()
-                return (
-                    uuid.uuid5(NAMESPACE_FOR_UUID, prompt_str).hex,
-                    len(body),
-                )
-
-            if isinstance(body, list):
-                extracted_text = ""
-                for m in body:
-                    if isinstance(m, dict):
-                        extracted_text += str(m.get("content", ""))
-                    else:
-                        extracted_text += str(getattr(m, "content", ""))
-                char_len = len(extracted_text)
-                return (
-                    uuid.uuid5(NAMESPACE_FOR_UUID, extracted_text).hex,
-                    char_len,
-                )
-
-        except Exception as e:  # noqa: BLE001
-            print(f"[PLUGIN ERROR] Failed to parse request ID securely: {e}")
-
-        return "", 0
-
-    def _estimate_tokens_required(self, rollout_id: str, char_len: int, fc: dict) -> int:
-        stats = self._rollout_request_stats.get(rollout_id)
-        if stats:
-            return stats["isl"] + stats["osl"]
-
-        default_osl: int = fc.get("default_osl", 1024)
-        return (char_len // 4) + default_osl
+def _reports_no_capacity(ep: Endpoint) -> bool:
+    # Engines not yet polled have empty stats and are simply waited for.
+    stats = ep.attributes.get("routing_stats")
+    return isinstance(stats, dict) and bool(stats) and not stats.get("error") and _capacity(ep) <= 0
