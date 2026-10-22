@@ -102,6 +102,8 @@ Scorers assign scores to replicas. Multiple scorers are normalized and weighted.
     *   `max_prefix_blocks` (int, default: `256`): Max blocks to index.
     *   `lru_capacity_per_server` (int, default: `31250`): Cache capacity per replica.
     *   `min_match_ratio` (float, default: `0.0`): Minimum fraction of prompt blocks the best replica must have cached for prefix scores to be used; below it, the request is treated as novel and routed to the least-loaded replicas. The default of `0` disables the threshold, so the least-loaded fallback only fires when no replica has any matching block.
+*   **`sticky_session`**: Scores one replica per session at `1.0` and every other replica at `0.0`. The replica is picked by rendezvous hashing of a request header, so a session keeps its replica while that replica stays a candidate. Requests without the header get no vote.
+    *   `header_name` (string, required): The header that carries the session id. On verl, use `x-rls-session-id`, which the hook sets to the trajectory's request id.
 
 #### C. Generic Scorers (for benchmarking against current RL sampling routing)
 *   **`round_robin`**: Cycles through replicas sequentially.
@@ -127,7 +129,7 @@ Flow control plugins prevent replica overload and mid-decoding preemptions by co
 
 ## 4. Example Configuration
 
-Here is an example of a sophisticated `scheduler.yaml` that combines prefix caching, backpressure scoring, and KV saturation protection:
+Here is an example of a sophisticated `scheduler.yaml` that combines session affinity, prefix caching, backpressure scoring, and KV saturation protection:
 
 ```yaml
 profile_handler:
@@ -136,6 +138,10 @@ profile_handler:
 profiles:
   hybrid_policy:
     scorers:
+      # Keep every request of a session on the same replica
+      - type: sticky_session
+        header_name: x-rls-session-id
+        weight: 10.0
       # Heavily favor prefix cache hits for speed
       - type: prefix_cache
         weight: 10.0
