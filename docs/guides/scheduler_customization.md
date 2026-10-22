@@ -116,12 +116,10 @@ Pickers choose the final replica from the scored list.
 
 ### Flow Control (Gatekeeping)
 Flow control plugins prevent replica overload and mid-decoding preemptions by controlling the flow to affected replicas.
-*   **`kv_saturation`**: Estimates the KV cache impact of incoming requests. If routing a request to a replica would exceed its physical KV cache capacity (causing vLLM to preempt/drop other active requests), it blocks admission.
-    *   `enable_drip` (bool, default: `false`): Enables slow "drip" admission when all replicas are saturated, rather than blocking completely.
-    *   `drip_threshold_kv` (float, default: `0.1`): Max physical KV utilization for drip eligibility.
-    *   `drip_interval_s` (float, default: `2.0`): Minimum time between drip admissions.
-    *   `default_osl` (int, default: `1024`): Default output sequence length estimate used before stats are learned.
-    *   *More Info*: For a detailed deep-dive into how KV saturation budgeting works and its mathematical model, see the [KV Saturation Guide](../kv_saturation.md).
+*   **`kv_saturation`**: Admits a request only to a replica whose KV token budget has room for it. A request needs its prompt tokens plus its trajectory's previous output. The replica that served the trajectory's last turn is offered alone when it fits. Otherwise every replica that fits is offered, and the profile's scorers pick among them. When none fits, the request waits.
+    *   `default_osl` (int, default: `1024`): Output tokens assumed for a trajectory's first turn, before its real output is known.
+    *   `budget_fraction` (float, default: `1.0`): Share of each replica's KV capacity that may be reserved, in (0, 1]. Lower it to leave headroom for KV the ledger does not see.
+    *   *More Info*: See the [KV Saturation Guide](../kv_saturation.md).
 
 ---
 
@@ -149,9 +147,7 @@ profiles:
     picker:
       type: max_score
     flow_control:
-      # Protect against KV saturation and preemption storms
+      # Admit only where the request's tokens fit in the replica's KV budget
       type: kv_saturation
-      enable_drip: true
-      drip_threshold_kv: 0.15
       default_osl: 512
 ```
