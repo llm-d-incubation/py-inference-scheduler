@@ -100,6 +100,8 @@ If you want to customize the scheduler settings in a VM-based cluster:
 
 > [!TIP]
 > **Designing Custom Profiles**: To learn more about the available scorers, filters, pickers, and flow-control plugins you can use to customize your scheduling policies, refer to the comprehensive [Scheduler Customization Guide](../../docs/guides/scheduler_customization.md).
+>
+> **Overscheduling**: To run a rollout on fewer samplers with flow control and a Mooncake KV store, follow the [Overscheduling Guide](../../docs/guides/overscheduling.md).
 
 ---
 
