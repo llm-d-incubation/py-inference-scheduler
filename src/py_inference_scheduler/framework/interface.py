@@ -48,7 +48,11 @@ class FlowControlPlugin(Protocol):
 
     def reserve(self, request: LLMRequest, selected: Endpoint) -> None: ...
 
-    def release(self, request: LLMRequest, endpoint_name: str) -> None: ...
+    def release(
+        self, request: LLMRequest, endpoint_name: str, output_tokens: int | None = None
+    ) -> None:
+        """Frees the request's reservation. output_tokens is what it generated, when known."""
+        ...
 
 
 class ProfileHandler(Protocol):

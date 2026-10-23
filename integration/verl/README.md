@@ -5,9 +5,9 @@
 **This integration supports two verl layouts, auto-detected at import time:**
 
 - **verl v0.7.1** ("legacy"): `AsyncLLMServerManager` in `verl.experimental.agent_loop.agent_loop`, server list passed to workers.
-- **verl v0.9.x** ("modern"): `LLMServerClient` in `verl.workers.rollout.llm_server` with a `GlobalRequestLoadBalancer` actor owning the server registry; the hook bootstraps its endpoint set by draining the balancer once at first use.
+- **verl v0.9.x** ("modern"): `LLMServerClient` in `verl.workers.rollout.llm_server` with a `GlobalRequestLoadBalancer` actor owning the server registry. One fleet actor, shared by all agent-loop workers, recovers the engine handles by draining the balancer once.
 
-Both expose the same entrypoint flag (`agent_loop_manager_class=integration.verl.verl_hook.PyInferenceAgentLoopManager`). The modern path is validated GPU-free by [hook_compat_check.py](./hook_compat_check.py) (fake server actors + a real load balancer; verifies bootstrap, prefix-sticky routing, and inflight accounting). It uses internal API signatures and is **not backwards compatible** with verl versions earlier than v0.7.1; intermediate releases (v0.8.x) are untested.
+Both expose the same entrypoint flag (`agent_loop_manager_class=integration.verl.verl_hook.PyInferenceAgentLoopManager`). The modern path is validated GPU-free by [hook_compat_check.py](./hook_compat_check.py), which runs fake server actors against a real load balancer and verifies discovery, prefix-sticky and load-aware routing, burst spreading, and in-flight accounting. It uses internal API signatures and is **not backwards compatible** with verl versions earlier than v0.7.1. Intermediate releases (v0.8.x) are untested.
 
 ## Architecture
 
@@ -15,7 +15,7 @@ Both expose the same entrypoint flag (`agent_loop_manager_class=integration.verl
 
 Key components:
 - [verl_hook.py](./verl_hook.py): Contains `InferenceSchedulerServerManager` and `PyInferenceAgentLoopManager` which are injected into the `verl` training loop.
-- `InflightStore`: Tracks active requests per worker in real-time to augment slow Prometheus metrics.
+- [fleet.py](./fleet.py): one Ray actor shared by all agent-loop workers. It counts in-flight requests per engine across workers, discovers the engines once, and polls their metrics in the background. A profile with flow control gets an `AdmissionFleet` instead, an async version of the same actor that also admits and queues every request through [admission.py](./admission.py).
 - `backends/verl/`: Contains monkey-patches for `vllm` and `sglang` to expose engine metrics to the hook.
 - `datalayer/metrics/verl/`: Contains backend-specific logic (HTTP scraping) to fetch and parse metrics from the workers.
 
@@ -63,6 +63,7 @@ working_dir: "https://github.com/llm-d-incubation/py-inference-scheduler/archive
 env_vars:
   PYTHONPATH: "."
   ROUTER_CONFIG_PATH: "./integration/verl/examples/scheduler.yaml" # Relative to CWD (repo root)
+  RLS_METRICS_INTERVAL_MS: "100" # Optional, default 100: how often the hook polls engine metrics, in milliseconds
 ```
 Ray unpacks the zip, sets the CWD to the repo root, and resolves the relative path to the default config.
 
