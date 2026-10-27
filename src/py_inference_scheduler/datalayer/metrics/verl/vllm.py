@@ -27,9 +27,11 @@ async def get_vllm_routing_stats(server) -> dict:
         "num_waiting_reqs": 0,
         "num_running_reqs": 0,
         "kv": 0.0,
+        "kv_cache_size": 0,
         "error": None,
     }
     try:
+        stats["kv_cache_size"] = kv_capacity_tokens(server)
         host, port = server.get_server_address()
         url = f"http://{host}:{port}/metrics"
 
@@ -54,3 +56,9 @@ async def get_vllm_routing_stats(server) -> dict:
         stats["error"] = f"Exception in get_routing_stats: {e}"
 
     return stats
+
+
+def kv_capacity_tokens(server) -> int:
+    """KV capacity of the server's vLLM engine in tokens, or 0 before it has sized its cache."""
+    cache_config = server.engine.vllm_config.cache_config
+    return int((cache_config.num_gpu_blocks or 0) * cache_config.block_size)

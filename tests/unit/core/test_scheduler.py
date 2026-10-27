@@ -12,6 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from __future__ import annotations
+
+import os
+import textwrap
 
 import pytest
 
@@ -120,3 +124,77 @@ def test_filter_scorer_picker_combined():
     chosen = pr.endpoint_list[0].endpoint
     # pod2 has the smallest queue size, but is in the wrong zone, so pod 1 should be chosen
     assert chosen.name == "pod1"
+    assert [scored.endpoint.name for scored in pr.ranked] == ["pod1", "pod3"]
+
+
+WITH_FLOW_CONTROL = textwrap.dedent(
+    """
+    profile_handler:
+      type: single_profile
+    profiles:
+      default:
+        flow_control:
+          type: kv_saturation
+        scorers:
+          - type: least_queue
+            weight: 1.0
+        picker:
+          type: max_score
+    """
+)
+
+
+def test_sees_flow_control_before_the_first_decision(tmp_path):
+    config_file = tmp_path / "scheduler.yaml"
+    config_file.write_text(WITH_FLOW_CONTROL, encoding="utf-8")
+
+    assert Scheduler(config_path=str(config_file)).has_flow_control()
+
+
+def test_listing_plugins_leaves_reloads_to_schedule(tmp_path):
+    config_file = tmp_path / "scheduler.yaml"
+    config_file.write_text(WITH_FLOW_CONTROL, encoding="utf-8")
+    scheduler = Scheduler(config_path=str(config_file))
+    assert scheduler.has_flow_control()
+
+    without = WITH_FLOW_CONTROL.replace("    flow_control:\n      type: kv_saturation\n", "")
+    config_file.write_text(without, encoding="utf-8")
+    os.utime(config_file, (scheduler.last_mtime + 2, scheduler.last_mtime + 2))
+
+    assert scheduler.has_flow_control()
+
+
+class LearningScorer:
+    """Scores every pod the same and remembers where requests went."""
+
+    def __init__(self) -> None:
+        self.learned: list[str] = []
+
+    def score(self, cycle_state, request, pods):
+        return dict.fromkeys(pods, 1.0)
+
+    def pre_request(self, cycle_state, request, endpoint):
+        self.learned.append(endpoint.name)
+
+
+def _learning_scheduler() -> tuple[Scheduler, LearningScorer]:
+    scorer = LearningScorer()
+    profile = SchedulerProfile(name="default").with_scorers(WeightedScorer(scorer, 1.0))
+    return make_scheduler_with_profile(profile), scorer
+
+
+def test_scorers_learn_the_pick_by_default():
+    scheduler, scorer = _learning_scheduler()
+    scheduler.schedule(LLMRequest(request_id="r"), [Endpoint(name="pod1"), Endpoint(name="pod2")])
+
+    assert scorer.learned == ["pod1"]
+
+
+def test_scorers_learn_only_the_endpoint_recorded_later():
+    scheduler, scorer = _learning_scheduler()
+    request, other = LLMRequest(request_id="r"), Endpoint(name="pod2")
+    result = scheduler.schedule(request, [Endpoint(name="pod1"), other], record=False)
+    assert scorer.learned == []
+
+    scheduler.record(result, request, other)
+    assert scorer.learned == ["pod2"]
