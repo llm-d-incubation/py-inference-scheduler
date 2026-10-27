@@ -14,8 +14,11 @@
 
 from __future__ import annotations
 
+import pathlib
 from dataclasses import dataclass
 from typing import Any
+
+import yaml
 
 from py_inference_scheduler.framework import (
     ProfileHandler,
@@ -40,6 +43,15 @@ class SchedulerConfig:
             f"{{ProfileHandler: {type(self.profile_handler).__name__}, "
             f"Profiles: {list(self.profiles.keys())}}}"
         )
+
+    @classmethod
+    def from_file(cls, path: str) -> SchedulerConfig:
+        """Parse a YAML config file into a SchedulerConfig."""
+        with pathlib.Path(path).open(encoding="utf-8") as f:
+            config_dict = yaml.safe_load(f)
+        if not isinstance(config_dict, dict):
+            raise TypeError("Parsed configuration is not a valid dictionary.")
+        return cls.from_dict(config_dict)
 
     @classmethod
     def from_dict(cls, config_dict: dict[str, Any]) -> SchedulerConfig:  # noqa: PLR0914

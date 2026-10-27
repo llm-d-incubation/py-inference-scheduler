@@ -30,20 +30,19 @@ To debug effectively without making assumptions, you must understand how the int
 
 ### 2.1 Control Flow (Scheduling & Routing)
 1.  **Entry Point**: verl loads `PyInferenceAgentLoopManager` ([verl_hook.py](../../../integration/verl/verl_hook.py)), which overrides the worker actor class with `PyInferenceAgentLoopWorker`.
-2.  **Manager**: The worker spawns `InferenceSchedulerServerManager` which owns the `Scheduler` (engine) and the `InflightStore` (local queue tracker).
+2.  **Fleet**: The manager creates one named `Fleet` actor ([fleet.py](../../../integration/verl/fleet.py)) shared by every worker. It discovers the engines from verl's balancer once, polls their metrics in the background, and counts in-flight requests per engine across workers. With flow control in the profile, the manager creates an `AdmissionFleet` instead, a subclass that also admits every request and keeps one queue for the whole job.
 3.  **Scheduling Loop**: When verl requests a generation:
-    *   `_acquire_server()` is called. It acquires a lock to prevent concurrent scheduling during batching.
-    *   It triggers `fetch_worker_metrics()` for all endpoints.
-    *   It queries the `Scheduler` to select the best worker.
-    *   It increments the `InflightStore` for the selected worker (to account for lag in Prometheus metrics).
-    *   It returns the selected Ray worker handle to verl to execute the generation.
-4.  **Release**: Once generation completes, `_release_server()` decrements the `InflightStore`.
+    *   `_acquire_server()` takes the worker's lock and reads one fleet snapshot: engine metrics plus fleet-wide in-flight counts.
+    *   It queries the `Scheduler` to select the best engine.
+    *   It counts the dispatch in the fleet and returns the engine's Ray handle to verl.
+    *   With flow control, `_acquire_server()` ranks the engines the same way, then calls the fleet's `admit()` with that ranking. The fleet reserves the request's tokens on the highest-ranked engine with room, and the worker then tells its scorers which engine that was, since it can differ from the top-ranked one. If no engine has room, the fleet queues the request and later calls the worker's `rls_admitted()` with the engine it admitted the request to. The fleet is a sync actor, so it runs each worker's calls in order and a turn's finish always lands before the trajectory's next admit.
+4.  **Release**: Once generation completes, `_release_server()` decrements the engine's count in the fleet. With flow control it sends `finish` with the turn's output length instead, which frees the reservation and retries the queued requests on that engine.
 
 ### 2.2 Data Flow (Metrics Collection)
 *   **Step 1 (Exposure)**: vLLM/SGLang engines expose Prometheus metrics locally on the worker node (e.g., `http://localhost:8000/metrics`).
 *   **Step 2 (Monkey Patch)**: `VllmEnginePatch` ([backends/verl/vllm.py](../../../backends/verl/vllm.py)) / `SglangEnginePatch` ([backends/verl/sglang.py](../../../backends/verl/sglang.py)) injects `get_routing_stats()` into the worker server class.
 *   **Step 3 (Local Scrape)**: The worker actor performs a local HTTP GET request to its own `/metrics` endpoint and parses it via regex ([datalayer/metrics/verl/vllm.py](../../../datalayer/metrics/verl/vllm.py) / [sglang.py](../../../datalayer/metrics/verl/sglang.py)) to return a clean dictionary (waiting, running, KV cache).
-*   **Step 4 (RPC Collection)**: The manager on the head node collects these via Ray RPC (`actor.get_routing_stats.remote()`) inside [fetch_metrics.py](../../../datalayer/metrics/verl/fetch_metrics.py) and merges them with the `InflightStore`.
+*   **Step 4 (RPC Collection)**: The fleet actor's background poller collects these via Ray RPC (`actor.get_routing_stats.remote()`) inside [fetch_metrics.py](../../../datalayer/metrics/verl/fetch_metrics.py) every `RLS_METRICS_INTERVAL_MS` (default 100 ms). Decisions read the latest snapshot.
 
 ---
 
