@@ -13,6 +13,9 @@
 # limitations under the License.
 
 
+import os
+import textwrap
+
 import pytest
 
 from py_inference_scheduler import Scheduler, SchedulerConfig
@@ -120,3 +123,40 @@ def test_filter_scorer_picker_combined():
     chosen = pr.endpoint_list[0].endpoint
     # pod2 has the smallest queue size, but is in the wrong zone, so pod 1 should be chosen
     assert chosen.name == "pod1"
+
+
+WITH_FLOW_CONTROL = textwrap.dedent(
+    """
+    profile_handler:
+      type: single_profile
+    profiles:
+      default:
+        flow_control:
+          type: kv_saturation
+        scorers:
+          - type: least_queue
+            weight: 1.0
+        picker:
+          type: max_score
+    """
+)
+
+
+def test_sees_flow_control_before_the_first_decision(tmp_path):
+    config_file = tmp_path / "scheduler.yaml"
+    config_file.write_text(WITH_FLOW_CONTROL, encoding="utf-8")
+
+    assert Scheduler(config_path=str(config_file)).has_flow_control()
+
+
+def test_listing_plugins_leaves_reloads_to_schedule(tmp_path):
+    config_file = tmp_path / "scheduler.yaml"
+    config_file.write_text(WITH_FLOW_CONTROL, encoding="utf-8")
+    scheduler = Scheduler(config_path=str(config_file))
+    assert scheduler.has_flow_control()
+
+    without = WITH_FLOW_CONTROL.replace("    flow_control:\n      type: kv_saturation\n", "")
+    config_file.write_text(without, encoding="utf-8")
+    os.utime(config_file, (scheduler.last_mtime + 2, scheduler.last_mtime + 2))
+
+    assert scheduler.has_flow_control()
