@@ -46,9 +46,23 @@ class FlowControlPlugin(Protocol):
         self, request: LLMRequest, candidates: Sequence[Endpoint]
     ) -> Sequence[Endpoint]: ...
 
-    def reserve(self, request: LLMRequest, selected: Endpoint) -> None: ...
+    def reserve(self, request: LLMRequest, selected: Endpoint) -> None:
+        """Books the request on selected endpoint, which must come from get_allowed_candidates."""
+        ...
 
-    def release(self, request: LLMRequest, endpoint_name: str) -> None: ...
+    def release(
+        self, request: LLMRequest, endpoint_name: str, output_tokens: int | None = None
+    ) -> None:
+        """Frees the request's reservation. output_tokens is what it generated, when known."""
+        ...
+
+    def kv_tokens_needed(self, request: LLMRequest) -> int:
+        """The request's size, in the units max_admissible_kv_tokens() reports."""
+        ...
+
+    def max_admissible_kv_tokens(self, endpoint: Endpoint) -> int:
+        """The largest request the endpoint can take now."""
+        ...
 
 
 class ProfileHandler(Protocol):

@@ -106,50 +106,6 @@ class FlowControlManager:
             if not waiter.done():
                 waiter.set_result(True)
 
-    def attach_learning_callback(
-        self,
-        request: LLMRequest,
-        result: ReplicaResult,
-        is_streaming: bool,  # noqa: FBT001
-    ) -> None:
-        plugins = self._get_plugins()
-        if not plugins:
-            return
-
-        # we only have one flow control plugin right now
-        plugin = plugins[0]
-        rollout_request_id, _ = plugin._get_rollout_request_id(request.body)  # type: ignore[attr-defined]
-
-        if not is_streaming:
-            original_get_async = result.get_async
-
-            async def patched_get_async():
-                response = await original_get_async()
-                if response and hasattr(response, "usage") and response.usage:
-                    for plugin in plugins:
-                        plugin.update_learned_stats(  # type: ignore[attr-defined]
-                            rollout_request_id,
-                            response.usage.prompt_tokens,
-                            response.usage.completion_tokens,
-                        )
-                return response
-
-            result.get_async = patched_get_async
-        else:
-            original_anext = result.__anext__
-
-            async def patched_anext():
-                chunk = await original_anext()
-                if chunk and hasattr(chunk, "usage") and chunk.usage:
-                    for plugin in plugins:
-                        plugin.update_learned_stats(  # type: ignore[attr-defined]
-                            rollout_request_id,
-                            chunk.usage.prompt_tokens,
-                            chunk.usage.completion_tokens,
-                        )
-                return chunk
-            result.__anext__ = patched_anext
-
 
 class IGWRouter(RequestRouter):
     def __init__(  # noqa: PLR0913
@@ -320,11 +276,9 @@ class IGWRouter(RequestRouter):
         result: ReplicaResult,
     ) -> None:
         llm_req = self._parse_to_llm_request(pending_request)
-        is_streaming = pending_request.metadata.is_streaming
 
         if self.scheduler.has_flow_control():
             result.add_done_callback(lambda _: self.fc_manager.release(llm_req, str(replica_id)))
-            self.fc_manager.attach_learning_callback(llm_req, result, is_streaming)
 
 
 # Hooking into Ray Serve's Request Router
