@@ -1,46 +1,27 @@
 # KV Saturation Flow Control
 
-The KV Saturation system is a flow control mechanism designed to maximize sampling throughput in memory-intensive sampling workloads by preventing KV cache preemptions.
+`kv_saturation` admits a request only to a replica whose KV cache has room for it, so engines are never asked to hold more context than fits and preempt running requests to make space. It runs in the Ray Serve router.
 
-Currently, this feature is implemented as a plugin in the **Ray Serve** integration.
+## How it works
 
-## Core Concepts
-
-### 1. Token Budgeting
-We have found that one of the causes of throughput collapse in vLLM is the "Recompute Tax" incurred when a GPU runs out of KV cache and must preempt (evict) a running request. Re-admitting that request requires recomputation of the preempted tokens, which creates bubbles in the GPU decode batch.
-
-The KV Saturation system reduces this by ensuring a request is **only** admitted to a replica if that replica has enough theoretical capacity to serve the request from start to finish.
-
-*   **Learning Phase:** During the first encounter with a prompt, the router records the actual Input Sequence Length (ISL) and Output Sequence Length (OSL).
-*   **Virtual Reservation:** For all subsequent requests with the same fingerprint, the router calculates the full memory footprint of the request (ISL + OSL). It maintains a virtual counter of tokens occupied on each replica and will park new requests in an asynchronous queue if the addition of the new request would exceed the hardware's KV token budget.
-
-### 2. The Drip Mechanism - Experimental
-In batch-heavy workloads, requests often finish in "cliffs"—where utilization drops significantly because the router waits for a full completion before admitting the next batch. This creates significant GPU idle time.
-
-The **Drip** functionality acts as a controlled "pressure valve" to smooth out these utilization cliffs. This is used only when the virtual KV Cache for a replica is already exhausted. If a replica's physical KV cache usage falls below a specific threshold (decided by the user for now), the router will "drip" one extra request into that replica, even if the virtual budget is technically full. This ensures that as one batch finishes, there are still requests partially through their prefill/decode phase, raising the floor of average utilization.
+1. **Budget.** Each replica's budget is `budget_fraction` of its KV cache capacity in tokens, minus what admitted, unfinished requests have reserved. Capacity comes from the engine itself: vLLM's KV cache block count times its block size. Engines that report no capacity, such as SGLang, make admission fail with an error instead of queueing requests forever. Lower `budget_fraction` below 1 when something outside the reservations holds KV, such as a KV connector that keeps a finished request's blocks while it saves them.
+2. **Request size.** A request needs its prompt tokens plus its trajectory's output from the previous turn. A trajectory's first turn assumes `default_osl` output tokens. A request larger than a whole replica reserves that replica's full capacity, so it runs on an idle replica.
+3. **Last replica.** The replica that served the trajectory's last turn still holds most of its context, so when it has room it is the only replica allowed. Otherwise every replica with room is allowed. Picking among the allowed replicas is left to the scheduler, which scores them with the profile's scorers.
+4. **Queueing.** When no replica fits, the request waits until a reservation is freed.
+5. **Release.** When a request finishes, its reservation is freed. When the integration reports its output length, that length and the replica become what the trajectory's next turn uses. Ray Serve doesn't report output lengths, so every Ray Serve request assumes `default_osl`.
 
 ## Configuration
-
-The system is configured via the `flow_control` block in `scheduler_config.yaml`. Flow control is enabled at the profile level by specifying the plugin type.
-
-### Example Configuration
 
 ```yaml
 profiles:
   default:
     flow_control:
-      type: kv_saturation      # Specifies the flow control plugin
-      enable_drip: true        # Enable the drip mechanism
-      default_osl: 1024        # OSL estimate for the very first contact (profiling)
-      drip_threshold_kv: 0.2   # Drip if physical KV usage < 20%
-      drip_interval_s: 2.0     # Limit drips to one every 2 seconds per replica
-```
-
-#### Strict Budgeting Mode (No Drip)
-To enforce a mathematically strict budget where preemptions are theoretically impossible, you can disable the drip mechanism by setting `enable_drip: false`:
-```yaml
-    flow_control:
       type: kv_saturation
-      enable_drip: false
-      default_osl: 1024
+      default_osl: 1024   # output tokens assumed for a trajectory's first turn
+      budget_fraction: 1.0  # share of each replica's KV capacity that may be reserved, in (0, 1]
+    scorers:
+      - type: least_queue
+        weight: 1.0
+    picker:
+      type: max_score
 ```
