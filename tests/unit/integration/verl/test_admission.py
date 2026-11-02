@@ -175,7 +175,7 @@ def test_a_retry_admits_waiting_requests_once_the_first_poll_brings_capacity():
     waiter = _queued(admission, _turn("t1", 10))
 
     engine.attributes["kv_cache_size"] = 100
-    admission.retry()
+    admission.retry_waiting()
 
     assert waiter.received == [engine]
 
@@ -186,7 +186,7 @@ def test_a_waiting_caller_sees_why_admission_failed():
     waiter = _queued(admission, _turn("t1", 10))
 
     engine.attributes["routing_stats"] = {"num_running_reqs": 0}
-    admission.retry()
+    admission.retry_waiting()
 
     [error] = waiter.received
     assert isinstance(error, RuntimeError)
