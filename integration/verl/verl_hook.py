@@ -119,7 +119,9 @@ class _SchedulerCore:
         request = LLMRequest(request_id=request_id, body=prompt_ids)
         if self.admits:
             async with self.lock:
-                result = self.scheduler.schedule(request, await self._snapshot(), record=False)
+                result = self.scheduler.schedule(
+                    request, await self._endpoints_from_snapshot(), record_placement=False
+                )
             primary = result.profile_results.get(result.primary_profile_name or "")
             ranking = [scored.endpoint.name for scored in primary.ranked] if primary else []
             ticket = uuid.uuid4().hex
@@ -142,19 +144,19 @@ class _SchedulerCore:
             admitted = next(ep for ep in self.endpoints if ep.name == name)
             # The fleet can admit the request to an engine other than the top-ranked one, so the
             # scorers learn the engine it actually went to.
-            self.scheduler.record(result, request, admitted)
+            self.scheduler.record_placement(result, request, admitted)
             return admitted
         async with self.lock:
             # Ray runs one caller's actor calls in order, so this worker's last
             # dispatch is already counted in the snapshot.
-            selected = self.scheduler.run(request, candidates=await self._snapshot())
+            selected = self.scheduler.run(request, candidates=await self._endpoints_from_snapshot())
             if not selected:
                 return None
             winner: Endpoint = selected[0].endpoint
             self.record_dispatch(winner.name)
             return winner
 
-    async def _snapshot(self) -> list[Endpoint]:
+    async def _endpoints_from_snapshot(self) -> list[Endpoint]:
         """This worker's endpoints, carrying the fleet's latest stats and in-flight counts."""
         snapshot: FleetSnapshot = await self.fleet.snapshot.remote()
         for ep in self.endpoints:
