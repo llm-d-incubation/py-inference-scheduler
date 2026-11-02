@@ -113,11 +113,7 @@ class KVSaturationPlugin(FlowControlPlugin):
 
         An idle engine takes any request, as an oversize one reserves a whole engine.
         """
-        budget = self._kv_token_budget(ep)
-        if budget <= 0:
-            return 0
-        reserved = self._reserved_by_engine.get(ep.name, 0)
-        return budget - reserved if reserved else sys.maxsize
+        return self._max_admissible_kv_tokens(ep, request_id=None)
 
     def _drop_reservation(self, request_id: str) -> str | None:
         reservation = self._reservations.pop(request_id, None)
@@ -127,13 +123,20 @@ class KVSaturationPlugin(FlowControlPlugin):
         return reservation.engine
 
     def _fits(self, ep: Endpoint, need: int, request_id: str) -> bool:
+        admissible = self._max_admissible_kv_tokens(ep, request_id)
+        return self._kv_token_budget(ep) > 0 and need <= admissible
+
+    def _max_admissible_kv_tokens(self, ep: Endpoint, request_id: str | None) -> int:
+        """The largest request ep can take now, not counting request_id's own reservation there."""
         budget = self._kv_token_budget(ep)
+        if budget <= 0:
+            return 0
         # A request routed again must not compete with its own old reservation.
-        reservation = self._reservations.get(request_id)
+        reservation = self._reservations.get(request_id) if request_id else None
         own = reservation.tokens if reservation and reservation.engine == ep.name else 0
         reserved = self._reserved_by_engine.get(ep.name, 0) - own
         # An oversize request reserves the whole budget, so it waits for an idle engine.
-        return budget > 0 and reserved + min(need, budget) <= budget
+        return budget - reserved if reserved else sys.maxsize
 
     def _kv_token_budget(self, ep: Endpoint) -> int:
         return int(_capacity(ep) * self.budget_fraction)
