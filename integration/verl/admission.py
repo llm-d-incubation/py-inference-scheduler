@@ -88,7 +88,7 @@ class Admission:
         # Only this engine gained room, so only it can take a queued request now.
         freed = next((ep for ep in self._endpoints() if ep.name == endpoint_name), None)
         if freed is not None:
-            self.retry(freed)
+            self.retry_waiting(freed)
 
     def _try_admit(
         self, request: LLMRequest, ranking: Sequence[str], candidates: Sequence[Endpoint]
@@ -102,7 +102,7 @@ class Admission:
         self._counts.increment(winner.name)
         return winner
 
-    def retry(self, engine: Endpoint | None = None) -> None:
+    def retry_waiting(self, engine: Endpoint | None = None) -> None:
         """Admit the queued requests that now fit on this engine, or on any engine by default."""
         engines = [engine] if engine is not None else self._endpoints()
         largest = self._largest_admissible_kv_tokens(engines)

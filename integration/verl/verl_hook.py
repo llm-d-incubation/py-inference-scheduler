@@ -104,7 +104,9 @@ class _SchedulerCore:
         _SchedulerCore.current = self
         if self.admits:
             # Sent before this worker's first admit, so the fleet knows where to call back.
-            self.fleet.register.remote(self.worker_id, ray.get_runtime_context().current_actor)
+            self.fleet.register_worker.remote(
+                self.worker_id, ray.get_runtime_context().current_actor
+            )
 
     def set_endpoints(self, handles: dict[str, ray.actor.ActorHandle]) -> None:
         self.endpoints = [
@@ -172,7 +174,9 @@ class _SchedulerCore:
         else:
             self.fleet.decrement.remote(endpoint_name)
 
-    def admitted(self, ticket: str, request_id: str, name: str | None, error: str | None) -> None:
+    def receive_admission(
+        self, ticket: str, request_id: str, name: str | None, error: str | None
+    ) -> None:
         """The fleet admitted this worker's queued request, or could not."""
         queued = self.waiting.get(ticket)
         if queued is None or queued.done():
@@ -194,7 +198,7 @@ class _AdmissionCallback:
     ) -> None:
         """The fleet's callback for a request this worker queued."""
         if _SchedulerCore.current is not None:
-            _SchedulerCore.current.admitted(ticket, request_id, name, error)
+            _SchedulerCore.current.receive_admission(ticket, request_id, name, error)
 
 
 if _VERL_LAYOUT == "legacy":
