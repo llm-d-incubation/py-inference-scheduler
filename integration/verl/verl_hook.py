@@ -106,7 +106,9 @@ class _SchedulerCore:
         _SchedulerCore.current = self
         if self.admits:
             # Sent before this worker's first admit, so the fleet knows where to call back.
-            self.fleet.register.remote(self.worker_id, ray.get_runtime_context().current_actor)
+            self.fleet.register_worker.remote(
+                self.worker_id, ray.get_runtime_context().current_actor
+            )
 
     def set_endpoints(self, handles: dict[str, ray.actor.ActorHandle]) -> None:
         self.endpoints = [
@@ -121,7 +123,7 @@ class _SchedulerCore:
             snapshot, base = await self.view.fetch()
             async with self.lock:
                 endpoints = self.view.apply(snapshot, base, self.endpoints)
-                result = self.scheduler.schedule(request, endpoints, record=False)
+                result = self.scheduler.schedule(request, endpoints, record_placement=False)
             primary = result.profile_results.get(result.primary_profile_name or "")
             ranking = [scored.endpoint.name for scored in primary.ranked] if primary else []
             ticket = uuid.uuid4().hex
@@ -143,7 +145,7 @@ class _SchedulerCore:
             admitted = next(ep for ep in self.endpoints if ep.name == name)
             # The fleet can admit the request to an engine other than the top-ranked one, so the
             # scorers learn the engine it actually went to.
-            self.scheduler.record(result, request, admitted)
+            self.scheduler.record_placement(result, request, admitted)
             return admitted
         snapshot, base = await self.view.fetch()
         async with self.lock:
@@ -169,7 +171,9 @@ class _SchedulerCore:
         else:
             self.fleet.decrement.remote(endpoint_name)
 
-    def admitted(self, ticket: str, request_id: str, name: str | None, error: str | None) -> None:
+    def receive_admission(
+        self, ticket: str, request_id: str, name: str | None, error: str | None
+    ) -> None:
         """The fleet admitted this worker's queued request, or could not."""
         queued = self.waiting.get(ticket)
         if queued is None or queued.done():
@@ -191,7 +195,7 @@ class _AdmissionCallback:
     ) -> None:
         """The fleet's callback for a request this worker queued."""
         if _SchedulerCore.current is not None:
-            _SchedulerCore.current.admitted(ticket, request_id, name, error)
+            _SchedulerCore.current.receive_admission(ticket, request_id, name, error)
 
 
 if _VERL_LAYOUT == "legacy":
