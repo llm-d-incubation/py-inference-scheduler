@@ -186,8 +186,8 @@ def test_scorers_learn_the_pick_by_default():
 def test_scorers_learn_only_the_endpoint_recorded_later():
     scheduler, scorer = _learning_scheduler()
     request, other = LLMRequest(request_id="r"), Endpoint(name="pod2")
-    result = scheduler.schedule(request, [Endpoint(name="pod1"), other], record=False)
+    result = scheduler.schedule(request, [Endpoint(name="pod1"), other], record_placement=False)
     assert scorer.learned == []
 
-    scheduler.record(result, request, other)
+    scheduler.record_placement(result, request, other)
     assert scorer.learned == ["pod2"]
