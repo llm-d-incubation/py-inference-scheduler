@@ -107,7 +107,7 @@ class AdmissionFleet(Fleet):
         retry_interval_s = interval_ms / 1000
         threading.Thread(target=self._retry_on_polls, args=(retry_interval_s,), daemon=True).start()
 
-    def register(self, worker_id: str, worker: ray.actor.ActorHandle) -> None:
+    def register_worker(self, worker_id: str, worker: ray.actor.ActorHandle) -> None:
         """Remember how to call a worker back when its queued request is admitted."""
         self._workers[worker_id] = worker
 
@@ -116,7 +116,7 @@ class AdmissionFleet(Fleet):
         winner = self._get_admission().admit(
             request,
             ticket,
-            lambda result: self._deliver(worker_id, ticket, request.request_id, result),
+            lambda result: self._deliver_to_worker(worker_id, ticket, request.request_id, result),
         )
         return winner.name if winner is not None else None
 
@@ -128,11 +128,11 @@ class AdmissionFleet(Fleet):
         """Release an admitted request's reservation and retry the requests waiting for one."""
         self._get_admission().finish(request_id, endpoint_name, output_tokens)
 
-    def retry(self) -> None:
+    def retry_waiting(self) -> None:
         """Admit the queued requests that now fit."""
-        self._get_admission().retry()
+        self._get_admission().retry_waiting()
 
-    def _deliver(
+    def _deliver_to_worker(
         self, worker_id: str, ticket: str, request_id: str, result: Endpoint | Exception
     ) -> None:
         name = result.name if isinstance(result, Endpoint) else None
@@ -147,7 +147,7 @@ class AdmissionFleet(Fleet):
             time.sleep(interval_s)
             if self._admission is not None and self._admission.has_waiting():
                 actor = actor or ray.get_runtime_context().current_actor
-                actor.retry.remote()
+                actor.retry_waiting.remote()
 
     def _get_admission(self) -> Admission:
         if self._admission is None:
@@ -210,7 +210,8 @@ def _worker_node() -> str:
 def fleet_actor(*, admits: bool = False) -> ray.actor.ActorHandle:
     """The job's fleet actor, created by the first caller and shared with the rest by name.
 
-    A profile with flow control gets an AdmissionFleet, any other profile the plain Fleet.
+    - A profile with flow control gets an AdmissionFleet, which admits and queues every request.
+    - A profile without flow control gets the plain Fleet, and workers route on its shared stats.
     """
     interval_ms = int(os.environ.get("RLS_METRICS_INTERVAL_MS", "100"))
     # num_cpus=0: an actor pending behind verl's CPU reservations would stall every worker. Zero
