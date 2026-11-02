@@ -42,14 +42,17 @@ def _fleet() -> SimpleNamespace:
 
 def _queue_len(view: FleetView, name: str) -> object:
     """The in-flight count the view adds for an engine to an empty snapshot."""
-    [engine] = view.apply(FleetSnapshot(stats={}, inflight={}), {}, [Endpoint(name=name)])
+    [engine] = view.apply_snapshot(FleetSnapshot(stats={}, inflight={}), {}, [Endpoint(name=name)])
     return engine.attributes["queue_len"]
 
 
 async def test_decisions_share_a_snapshot_request_only_while_it_is_in_flight():
     fleet = _fleet()
     view = FleetView(fleet)
-    first, second = asyncio.ensure_future(view.fetch()), asyncio.ensure_future(view.fetch())
+    first, second = (
+        asyncio.ensure_future(view.fetch_snapshot()),
+        asyncio.ensure_future(view.fetch_snapshot()),
+    )
     await asyncio.sleep(0)
 
     snapshot = FleetSnapshot(stats={}, inflight={"e1": 2})
@@ -59,7 +62,7 @@ async def test_decisions_share_a_snapshot_request_only_while_it_is_in_flight():
     assert (await first)[0] is snapshot
     assert (await second)[0] is snapshot
 
-    later = asyncio.ensure_future(view.fetch())
+    later = asyncio.ensure_future(view.fetch_snapshot())
     await asyncio.sleep(0)
 
     assert len(fleet.snapshots) == 2
@@ -69,15 +72,15 @@ async def test_decisions_share_a_snapshot_request_only_while_it_is_in_flight():
 async def test_the_view_adds_only_the_sends_a_snapshot_missed():
     fleet = _fleet()
     view = FleetView(fleet)
-    view.count("e1", 1)
-    fetching = asyncio.ensure_future(view.fetch())
+    view.count_sends("e1", 1)
+    fetching = asyncio.ensure_future(view.fetch_snapshot())
     await asyncio.sleep(0)
-    view.count("e1", 1)
+    view.count_sends("e1", 1)
 
     # The fleet counted the first send before the snapshot, but not the second.
     fleet.snapshots[0].set_result(FleetSnapshot(stats={}, inflight={"e1": 5}))
     snapshot, base = await fetching
-    [engine] = view.apply(snapshot, base, [Endpoint(name="e1")])
+    [engine] = view.apply_snapshot(snapshot, base, [Endpoint(name="e1")])
 
     assert engine.attributes["queue_len"] == 6
 
