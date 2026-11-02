@@ -107,7 +107,7 @@ class Admission:
     def retry(self, engine: Endpoint | None = None) -> None:
         """Admit the queued requests that now fit on this engine, or on any engine by default."""
         engines = [engine] if engine is not None else self._endpoints()
-        largest = max((self._plugin.max_admissible_kv_tokens(ep) for ep in engines), default=0)
+        largest = self._largest_admissible_kv_tokens(engines)
         for waiting in list(self._waiting):
             # A size check first, so a long queue that still fits nowhere costs little. With no
             # room anywhere, the plugin still sees each request, to report engines it cannot use.
@@ -122,6 +122,8 @@ class Admission:
             if winner is not None:
                 self._waiting.remove(waiting)
                 waiting.deliver(winner)
-                largest = max(
-                    (self._plugin.max_admissible_kv_tokens(ep) for ep in engines), default=0
-                )
+                largest = self._largest_admissible_kv_tokens(engines)
+
+    def _largest_admissible_kv_tokens(self, engines: Sequence[Endpoint]) -> int:
+        """The largest request any of these engines can take now."""
+        return max((self._plugin.max_admissible_kv_tokens(ep) for ep in engines), default=0)
