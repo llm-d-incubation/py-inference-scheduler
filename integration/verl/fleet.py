@@ -210,7 +210,8 @@ def _worker_node() -> str:
 def fleet_actor(*, admits: bool = False) -> ray.actor.ActorHandle:
     """The job's fleet actor, created by the first caller and shared with the rest by name.
 
-    A profile with flow control gets an AdmissionFleet, any other profile the plain Fleet.
+    - A profile with flow control gets an AdmissionFleet, which admits and queues every request.
+    - A profile without flow control gets the plain Fleet, and workers route on its shared stats.
     """
     interval_ms = int(os.environ.get("RLS_METRICS_INTERVAL_MS", "100"))
     # num_cpus=0: an actor pending behind verl's CPU reservations would stall every worker. Zero
