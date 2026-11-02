@@ -96,12 +96,13 @@ class Scheduler:
             self.last_mtime = mtime
 
     def schedule(
-        self, request: LLMRequest, candidates: Sequence[Endpoint], *, record: bool = True
+        self, request: LLMRequest, candidates: Sequence[Endpoint], *, record_placement: bool = True
     ) -> SchedulingResult:
         """Run the profiles and pick an endpoint.
 
-        With record=False the scorers don't learn the pick yet, for a caller that may place the
-        request elsewhere. It calls record() once the request's endpoint is known.
+        With record_placement=False the scorers don't learn the pick yet, for a caller that may
+        place the request elsewhere. It calls record_placement() once the request's endpoint
+        is known.
         """
         self._maybe_reload_config()
         if not candidates:
@@ -146,11 +147,13 @@ class Scheduler:
             else []
         )
         print(f"Selected endpoint {selected_eps}")
-        if record and selected_eps:
-            self.record(result, request, selected_eps[0].endpoint)
+        if record_placement and selected_eps:
+            self.record_placement(result, request, selected_eps[0].endpoint)
         return result
 
-    def record(self, result: SchedulingResult, request: LLMRequest, endpoint: Endpoint) -> None:
+    def record_placement(
+        self, result: SchedulingResult, request: LLMRequest, endpoint: Endpoint
+    ) -> None:
         """Tell the primary profile's scorers which endpoint the request went to."""
         profile = self.profiles.get(result.primary_profile_name or "")
         if profile is None:
