@@ -282,7 +282,7 @@ class FleetView:
         self._local: dict[str, int] = {}
         self._pending: tuple[asyncio.Future[FleetSnapshot], dict[str, int]] | None = None
 
-    async def fetch(self) -> tuple[FleetSnapshot, dict[str, int]]:
+    async def fetch_snapshot(self) -> tuple[FleetSnapshot, dict[str, int]]:
         """The fleet's latest snapshot, and this worker's counts when it was requested."""
         if self._pending is None:
             requested = asyncio.ensure_future(self._fleet.snapshot.remote())
@@ -295,7 +295,7 @@ class FleetView:
                 self._pending = None
         return snapshot, base
 
-    def apply(
+    def apply_snapshot(
         self, snapshot: FleetSnapshot, base: dict[str, int], endpoints: list[Endpoint]
     ) -> list[Endpoint]:
         """The endpoints, carrying the snapshot's stats and the in-flight counts it missed."""
@@ -305,7 +305,7 @@ class FleetView:
             ep.attributes["queue_len"] = snapshot.inflight.get(ep.name, 0) + unseen
         return endpoints
 
-    def count(self, name: str, delta: int) -> None:
+    def count_sends(self, name: str, delta: int) -> None:
         self._local[name] = self._local.get(name, 0) + delta
 
     async def request_admission(
@@ -318,9 +318,9 @@ class FleetView:
         """
         guess = ranking[0] if ranking else None
         if guess:
-            self.count(guess, 1)
+            self.count_sends(guess, 1)
         try:
             return await request_admission(self._fleet, request, ranking, worker_id, ticket)
         finally:
             if guess:
-                self.count(guess, -1)
+                self.count_sends(guess, -1)

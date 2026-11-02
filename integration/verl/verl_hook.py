@@ -120,9 +120,9 @@ class _SchedulerCore:
         """Pick an endpoint. None means fall back to verl's LB."""
         request = LLMRequest(request_id=request_id, body=prompt_ids)
         if self.admits:
-            snapshot, base = await self.view.fetch()
+            snapshot, base = await self.view.fetch_snapshot()
             async with self.lock:
-                endpoints = self.view.apply(snapshot, base, self.endpoints)
+                endpoints = self.view.apply_snapshot(snapshot, base, self.endpoints)
                 result = self.scheduler.schedule(request, endpoints, record_placement=False)
             primary = result.profile_results.get(result.primary_profile_name or "")
             ranking = [scored.endpoint.name for scored in primary.ranked] if primary else []
@@ -141,15 +141,15 @@ class _SchedulerCore:
                 raise
             finally:
                 self.waiting.pop(ticket, None)
-            self.view.count(name, 1)
+            self.view.count_sends(name, 1)
             admitted = next(ep for ep in self.endpoints if ep.name == name)
             # The fleet can admit the request to an engine other than the top-ranked one, so the
             # scorers learn the engine it actually went to.
             self.scheduler.record_placement(result, request, admitted)
             return admitted
-        snapshot, base = await self.view.fetch()
+        snapshot, base = await self.view.fetch_snapshot()
         async with self.lock:
-            endpoints = self.view.apply(snapshot, base, self.endpoints)
+            endpoints = self.view.apply_snapshot(snapshot, base, self.endpoints)
             selected = self.scheduler.run(request, candidates=endpoints)
             if not selected:
                 return None
@@ -158,13 +158,13 @@ class _SchedulerCore:
             return winner
 
     def record_dispatch(self, endpoint_name: str) -> None:
-        self.view.count(endpoint_name, 1)
+        self.view.count_sends(endpoint_name, 1)
         self.fleet.increment.remote(endpoint_name)
 
     def record_release(
         self, endpoint_name: str, request_id: str, output_tokens: int | None
     ) -> None:
-        self.view.count(endpoint_name, -1)
+        self.view.count_sends(endpoint_name, -1)
         if self.admits:
             # The sync fleet runs this before the trajectory's next admit, so nothing waits on it.
             self.fleet.finish.remote(request_id, endpoint_name, output_tokens)
