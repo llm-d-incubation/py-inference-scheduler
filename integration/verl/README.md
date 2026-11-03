@@ -5,9 +5,9 @@
 **This integration supports two verl layouts, auto-detected at import time:**
 
 - **verl v0.7.1** ("legacy"): `AsyncLLMServerManager` in `verl.experimental.agent_loop.agent_loop`, server list passed to workers.
-- **verl v0.9.x** ("modern"): `LLMServerClient` in `verl.workers.rollout.llm_server` with a `GlobalRequestLoadBalancer` actor owning the server registry; the hook bootstraps its endpoint set by draining the balancer once at first use.
+- **verl v0.9.x** ("modern"): `LLMServerClient` in `verl.workers.rollout.llm_server` with a `GlobalRequestLoadBalancer` actor owning the server registry. One fleet actor, shared by all agent-loop workers, recovers the engine handles by draining the balancer once.
 
-Both expose the same entrypoint flag (`agent_loop_manager_class=integration.verl.verl_hook.PyInferenceAgentLoopManager`). The modern path is validated GPU-free by [hook_compat_check.py](./hook_compat_check.py) (fake server actors + a real load balancer; verifies bootstrap, prefix-sticky routing, and inflight accounting). It uses internal API signatures and is **not backwards compatible** with verl versions earlier than v0.7.1; intermediate releases (v0.8.x) are untested.
+Both expose the same entrypoint flag (`agent_loop_manager_class=integration.verl.verl_hook.PyInferenceAgentLoopManager`). The modern path is validated GPU-free by [hook_compat_check.py](./hook_compat_check.py), which runs fake server actors against a real load balancer and verifies discovery, prefix-sticky and load-aware routing, burst spreading, and in-flight accounting. It uses internal API signatures and is **not backwards compatible** with verl versions earlier than v0.7.1. Intermediate releases (v0.8.x) are untested.
 
 ## Architecture
 
@@ -15,8 +15,8 @@ Both expose the same entrypoint flag (`agent_loop_manager_class=integration.verl
 
 Key components:
 - [verl_hook.py](./verl_hook.py): Contains `InferenceSchedulerServerManager` and `PyInferenceAgentLoopManager` which are injected into the `verl` training loop.
-- `InflightStore`: Tracks active requests per worker in real-time to augment slow Prometheus metrics.
-- `backends/verl/`: Contains monkey-patches for `vllm` and `sglang` to enable metrics extraction and correct environment propagation.
+- [fleet.py](./fleet.py): one Ray actor shared by all agent-loop workers. It counts in-flight requests per engine across workers, discovers the engines once, and polls their metrics in the background.
+- `backends/verl/`: Contains monkey-patches for `vllm` and `sglang` to expose engine metrics to the hook.
 - `datalayer/metrics/verl/`: Contains backend-specific logic (HTTP scraping) to fetch and parse metrics from the workers.
 
 ---
@@ -38,11 +38,8 @@ Before integrating the scheduler, you must set up a Ray cluster and ensure speci
 
 > [!IMPORTANT]
 > **You must configure the following resources when creating your Ray cluster:**
-> *   **Shared Metrics Directory**: The integration requires a shared, writable directory for Prometheus multiproc metrics.
->     *   **Kubernetes (K8s)**: You must define a shared volume (e.g., an `emptyDir` named `metrics-dir`) and mount it at `/tmp/metrics` on **both** the head and all worker pods.
->     *   **Non-Kubernetes (VMs)**: A directory (defaulting to `/tmp/metrics`) must exist and be writable by the Ray process on **every** node in the cluster.
 > *   **Scheduler Config Visibility (K8s Only)**: If running on K8s, a ConfigMap named `scheduler-config` (containing your `scheduler.yaml`) must be mounted to `/etc/scheduler` on all pods.
->     *   *Reference*: See [verl-inference-scheduler.yaml](./examples/verl-inference-scheduler.yaml#L55-L56) to see how these mounts are configured.
+>     *   *Reference*: See [verl-inference-scheduler.yaml](./examples/verl-inference-scheduler.yaml#L63-L64) to see how this mount is configured.
 >     *   The ConfigMap must be applied **before** deploying the cluster. Failing to do so will cause the pods to get stuck in a `CreateContainerConfigError` state. Refer to [Custom Configuration on Kubernetes (K8s)](#custom-configuration-on-kubernetes-k8s) for instructions on how to apply it.
 
 ### Dataset Preprocessing
@@ -65,8 +62,8 @@ You can use our default [runtime-env.yaml](./examples/runtime-env.yaml) file:
 working_dir: "https://github.com/llm-d-incubation/py-inference-scheduler/archive/refs/heads/main.zip"
 env_vars:
   PYTHONPATH: "."
-  PROMETHEUS_MULTIPROC_DIR: "/tmp/metrics"
   ROUTER_CONFIG_PATH: "./integration/verl/examples/scheduler.yaml" # Relative to CWD (repo root)
+  RLS_METRICS_INTERVAL_MS: "100" # Optional, default 100: how often the hook polls engine metrics, in milliseconds
 ```
 Ray unpacks the zip, sets the CWD to the repo root, and resolves the relative path to the default config.
 
@@ -98,7 +95,6 @@ If you want to customize the scheduler settings in a VM-based cluster:
       - "verl==0.7.1"
     env_vars:
       PYTHONPATH: "."
-      PROMETHEUS_MULTIPROC_DIR: "/tmp/metrics"
       ROUTER_CONFIG_PATH: "./integration/verl/examples/scheduler.yaml" # Relative to CWD (repo root)
     ```
 *   **Submit the job from the repository root** (see Section 3). Running from the root with `working_dir: "."` ensures Ray packages the entire repository (including the `scheduling` source code and your modified config), preventing import errors on the workers.
