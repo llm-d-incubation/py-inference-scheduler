@@ -60,16 +60,12 @@ spec:
             name: ray-tmp
           - mountPath: /home/ray/data
             name: data
-          - mountPath: /tmp/metrics
-            name: metrics-dir
           - mountPath: /etc/scheduler
             name: scheduler-vol
         volumes:
         - name: ray-tmp
           emptyDir: {}
         - name: data
-          emptyDir: {}
-        - name: metrics-dir
           emptyDir: {}
         - name: scheduler-vol
           configMap:
@@ -127,8 +123,6 @@ spec:
             name: nvidia
           - mountPath: /usr/local/gib
             name: gib
-          - mountPath: /tmp/metrics
-            name: metrics-dir
           - mountPath: /etc/scheduler
             name: scheduler-vol
           - mountPath: /home/ray/data
@@ -145,8 +139,6 @@ spec:
         - name: gib
           hostPath:
             path: /home/kubernetes/bin/gib
-        - name: metrics-dir
-          emptyDir: {}
         - name: scheduler-vol
           configMap:
             name: scheduler-config
