@@ -51,7 +51,8 @@ class ProfileRunResult:
 class SchedulingResult:
     profile_results: dict[str, ProfileRunResult] = field(default_factory=dict)
     primary_profile_name: str | None = None
-    # the run's state, which scorers that learn from a placement read in Scheduler.record_placement
+    # scratch data the scorers saved while scoring this request, like prefix_cache's prompt
+    # hashes, which record_placement() hands back to them
     cycle_state: CycleState | None = None
 
 
