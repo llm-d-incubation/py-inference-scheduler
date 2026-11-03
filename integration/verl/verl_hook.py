@@ -174,7 +174,7 @@ class _SchedulerCore:
         queued = self.waiting.get(ticket)
         if queued is None or queued.done():
             if name is not None:
-                # Its caller gave up, so undo the admission.
+                # verl cancelled this queued request, so free the engine the fleet admitted it to.
                 self.fleet.finish.remote(request_id, name, None)
             return
         if name is not None:
