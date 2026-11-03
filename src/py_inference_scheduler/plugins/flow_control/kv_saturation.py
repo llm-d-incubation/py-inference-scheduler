@@ -119,10 +119,10 @@ class KVSaturationPlugin(FlowControlPlugin):
         return budget > 0 and reserved + min(need, budget) <= budget
 
     def _kv_token_budget(self, ep: Endpoint) -> int:
-        return int(_kv_token_capacity(ep) * self.budget_fraction)
+        return int(_capacity(ep) * self.budget_fraction)
 
 
-def _kv_token_capacity(ep: Endpoint) -> int:
+def _capacity(ep: Endpoint) -> int:
     value = ep.attributes.get("kv_cache_size")
     return int(value) if isinstance(value, (int, float)) else 0
 
@@ -130,9 +130,4 @@ def _kv_token_capacity(ep: Endpoint) -> int:
 def _reports_no_capacity(ep: Endpoint) -> bool:
     # Engines not yet polled have empty stats and are simply waited for.
     stats = ep.attributes.get("routing_stats")
-    return (
-        isinstance(stats, dict)
-        and bool(stats)
-        and not stats.get("error")
-        and _kv_token_capacity(ep) <= 0
-    )
+    return isinstance(stats, dict) and bool(stats) and not stats.get("error") and _capacity(ep) <= 0
