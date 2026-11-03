@@ -39,7 +39,10 @@ class _Reservation(NamedTuple):
 
 
 class _LastTurn(NamedTuple):
-    """Where a trajectory's last turn ran, and its finished turns' total output and count."""
+    """Where a trajectory's last turn ran, and how many output tokens its finished turns made.
+
+    total_output / turns is the output the next turn reserves room for.
+    """
 
     engine: str
     total_output: int
