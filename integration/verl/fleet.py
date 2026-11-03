@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import asyncio
 import os
+import threading
+import time
 import uuid
 from dataclasses import dataclass
 from typing import cast
@@ -24,10 +26,13 @@ import aiohttp
 import ray
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
+from integration.verl.admission import Admission
+from py_inference_scheduler import Scheduler
+from py_inference_scheduler.core.config import SchedulerConfig
 from py_inference_scheduler.datalayer.metrics.datastore import InflightStore
 from py_inference_scheduler.datalayer.metrics.poller import MetricsPoller
 from py_inference_scheduler.datalayer.metrics.verl.fetch_metrics import fetch_worker_metrics
-from py_inference_scheduler.framework import Endpoint
+from py_inference_scheduler.framework import Endpoint, LLMRequest
 
 _ACTOR_NAME = "rls_fleet"
 
@@ -86,6 +91,81 @@ class Fleet(InflightStore):
         return FleetSnapshot(cast("dict[str, dict[str, object]]", stats), self.get_all())
 
 
+class AdmissionFleet(Fleet):
+    """The fleet for a profile with flow control, which also admits every request.
+
+    - Admits each request to an engine with room, or queues it in one queue for every worker and
+      calls the worker back once an engine has room.
+    - Runs as a sync actor like Fleet, so Ray keeps each worker's calls in order: a turn's finish
+      always runs before the trajectory's next admit.
+    """
+
+    def __init__(self, interval_ms: int) -> None:
+        super().__init__(interval_ms)
+        self._admission: Admission | None = None
+        self._workers: dict[str, ray.actor.ActorHandle] = {}
+        retry_interval_s = interval_ms / 1000
+        threading.Thread(target=self._retry_on_polls, args=(retry_interval_s,), daemon=True).start()
+
+    def register_worker(self, worker_id: str, worker: ray.actor.ActorHandle) -> None:
+        """Remember how to call a worker back when its queued request is admitted."""
+        self._workers[worker_id] = worker
+
+    def admit(self, request: LLMRequest, worker_id: str, ticket: str) -> str | None:
+        """Admit a request and return its engine's name, or queue it and return None."""
+        winner = self._get_admission().admit(
+            request,
+            ticket,
+            lambda result: self._deliver_to_worker(worker_id, ticket, request.request_id, result),
+        )
+        return winner.name if winner is not None else None
+
+    def cancel(self, ticket: str) -> None:
+        """Drop a queued request whose caller gave up."""
+        self._get_admission().cancel(ticket)
+
+    def finish(self, request_id: str, endpoint_name: str, output_tokens: int | None) -> None:
+        """Release an admitted request's reservation and retry the requests waiting for one."""
+        self._get_admission().finish(request_id, endpoint_name, output_tokens)
+
+    def retry_waiting(self) -> None:
+        """Admit the queued requests that now fit."""
+        self._get_admission().retry_waiting()
+
+    def _deliver_to_worker(
+        self, worker_id: str, ticket: str, request_id: str, result: Endpoint | Exception
+    ) -> None:
+        name = result.name if isinstance(result, Endpoint) else None
+        error = None if name is not None else repr(result)
+        self._workers[worker_id].rls_admitted.remote(ticket, request_id, name, error)
+
+    def _retry_on_polls(self, interval_s: float) -> None:
+        # Capacity also arrives with metrics polls, when no finish is coming to retry the queue. The
+        # retry runs as a call on this actor, so it never races the actor's other calls.
+        actor = None
+        while True:
+            time.sleep(interval_s)
+            if self._admission is not None and self._admission.has_waiting():
+                actor = actor or ray.get_runtime_context().current_actor
+                actor.retry_waiting.remote()
+
+    def _get_admission(self) -> Admission:
+        if self._admission is None:
+            # Loaded once, because a hot reload would replace the plugin and drop its reservations.
+            config = SchedulerConfig.from_file(os.environ["ROUTER_CONFIG_PATH"])
+            scheduler = Scheduler.new_with_config(config)
+            plugins = scheduler.get_flow_control_plugins()
+            if len(plugins) != 1:
+                raise ValueError("verl admission needs exactly one flow_control plugin.")
+            self._admission = Admission(
+                scheduler,
+                plugins[0],
+                self,
+                lambda: list(self._endpoints.values()),
+            )
+        return self._admission
+
+
 async def _collect_engine_handles(
     balancer: ray.actor.ActorHandle, expected: int, known: dict[str, ray.actor.ActorHandle]
 ) -> dict[str, ray.actor.ActorHandle]:
@@ -112,6 +192,7 @@ async def _fetch(ep: Endpoint, inflight: InflightStore, session: aiohttp.ClientS
 
 
 _FleetActor = ray.remote(Fleet)
+_AdmissionFleetActor = ray.remote(AdmissionFleet)
 
 
 def _worker_node() -> str:
@@ -126,13 +207,57 @@ def _worker_node() -> str:
     return here if here in with_cpus or not with_cpus else with_cpus[0]
 
 
-def fleet_actor() -> ray.actor.ActorHandle:
-    """The fleet actor, created by the first caller and shared with the rest by name."""
+def fleet_actor(*, admits: bool = False) -> ray.actor.ActorHandle:
+    """The job's fleet actor, created by the first caller and shared with the rest by name.
+
+    - A profile with flow control gets an AdmissionFleet, which admits and queues every request.
+    - A profile without flow control gets the plain Fleet, and workers route on its shared stats.
+    """
     interval_ms = int(os.environ.get("RLS_METRICS_INTERVAL_MS", "100"))
     # num_cpus=0: an actor pending behind verl's CPU reservations would stall every worker. Zero
     # CPUs also lets Ray pick a head node that runs no workers, so pin it to a node that runs them.
     # The pin is hard because Ray often ignores a soft one for an actor that asks for no CPUs.
     near_workers = NodeAffinitySchedulingStrategy(_worker_node(), soft=False)
-    return _FleetActor.options(
-        name=_ACTOR_NAME, get_if_exists=True, num_cpus=0, scheduling_strategy=near_workers
-    ).remote(interval_ms)
+    shared = {
+        "name": _ACTOR_NAME,
+        "get_if_exists": True,
+        "num_cpus": 0,
+        "scheduling_strategy": near_workers,
+    }
+    actor = (_AdmissionFleetActor if admits else _FleetActor).options(**shared)
+    return actor.remote(interval_ms)
+
+
+async def request_admission(
+    fleet: ray.actor.ActorHandle, request: LLMRequest, worker_id: str, ticket: str
+) -> str | None:
+    """Ask the fleet actor to admit a request: its engine's name, or None if it was queued.
+
+    If the caller is cancelled first, an admission that completes later is undone and a queued
+    request leaves the line, since Ray keeps the call running.
+    """
+    admitting: asyncio.Future[str | None] = asyncio.ensure_future(
+        fleet.admit.remote(request, worker_id, ticket)
+    )
+    try:
+        return await asyncio.shield(admitting)
+    except asyncio.CancelledError:
+        admitting.add_done_callback(
+            lambda done: _undo_admission(fleet, request.request_id, ticket, done)
+        )
+        raise
+
+
+def _undo_admission(
+    fleet: ray.actor.ActorHandle,
+    request_id: str,
+    ticket: str,
+    admitting: asyncio.Future[str | None],
+) -> None:
+    if admitting.cancelled() or admitting.exception() is not None:
+        return
+    name = admitting.result()
+    if name is None:
+        fleet.cancel.remote(ticket)
+    else:
+        fleet.finish.remote(request_id, name, None)
