@@ -14,6 +14,8 @@
 
 from __future__ import annotations
 
+import math
+import sys
 from collections import OrderedDict
 from typing import NamedTuple, Sequence
 
@@ -37,17 +39,21 @@ class _Reservation(NamedTuple):
 
 
 class _LastTurn(NamedTuple):
-    """Where a trajectory's last turn ran and how many tokens it generated."""
+    """Where a trajectory's last turn ran, and how many output tokens its finished turns made.
+
+    total_output / turns is the output the next turn reserves room for.
+    """
 
     engine: str
-    output_tokens: int
+    total_output: int
+    turns: int
 
 
 @register_flow_control("kv_saturation")
 class KVSaturationPlugin(FlowControlPlugin):
     """Admits a request only where its tokens fit in an engine's KV budget.
 
-    - A request needs its prompt plus its trajectory's last output, or default_osl on turn one.
+    - A request needs its prompt plus its trajectory's average output, or default_osl on turn one.
     - An engine's budget is budget_fraction of its KV capacity, minus what admitted, unfinished
       requests reserved.
     - Offers the engine that served the trajectory's last turn if it fits, otherwise every engine
@@ -71,7 +77,7 @@ class KVSaturationPlugin(FlowControlPlugin):
     ) -> Sequence[Endpoint]:
         if candidates and all(_reports_no_capacity(ep) for ep in candidates):
             raise RuntimeError("No engine reports its KV capacity, which kv_saturation needs.")
-        need = self._kv_tokens_needed(request)
+        need = self.kv_tokens_needed(request)
         fitting = [ep for ep in candidates if self._fits(ep, need, request.request_id)]
         last = self._last_turns.get(request.request_id)
         home = [ep for ep in fitting if last and ep.name == last.engine]
@@ -82,7 +88,7 @@ class KVSaturationPlugin(FlowControlPlugin):
         # first so the request is never booked on two engines.
         self._drop_reservation(request.request_id)
         engine = selected.name
-        tokens = min(self._kv_tokens_needed(request), self._kv_token_budget(selected))
+        tokens = min(self.kv_tokens_needed(request), self._kv_token_budget(selected))
         self._reserved_by_engine[engine] = self._reserved_by_engine.get(engine, 0) + tokens
         self._reservations[request.request_id] = _Reservation(engine, tokens)
 
@@ -92,10 +98,25 @@ class KVSaturationPlugin(FlowControlPlugin):
         engine = self._drop_reservation(request.request_id)
         if engine is None or output_tokens is None:
             return
-        self._last_turns[request.request_id] = _LastTurn(engine, output_tokens)
+        previous = self._last_turns.get(request.request_id)
+        total, turns = (previous.total_output, previous.turns) if previous else (0, 0)
+        self._last_turns[request.request_id] = _LastTurn(engine, total + output_tokens, turns + 1)
         self._last_turns.move_to_end(request.request_id)
         if len(self._last_turns) > _MAX_REMEMBERED_TRAJECTORIES:
             self._last_turns.popitem(last=False)
+
+    def kv_tokens_needed(self, request: LLMRequest) -> int:
+        """The request's prompt plus its trajectory's average output, or default_osl on turn one."""
+        last = self._last_turns.get(request.request_id)
+        output = math.ceil(last.total_output / last.turns) if last else self.default_osl
+        return prefill_tokens(request.body) + output
+
+    def max_admissible_kv_tokens(self, ep: Endpoint) -> int:
+        """The largest request the engine can take now.
+
+        An idle engine takes any request, as an oversize one reserves a whole engine.
+        """
+        return self._max_admissible_kv_tokens(ep, request_id=None)
 
     def _drop_reservation(self, request_id: str) -> str | None:
         reservation = self._reservations.pop(request_id, None)
@@ -104,25 +125,27 @@ class KVSaturationPlugin(FlowControlPlugin):
         self._reserved_by_engine[reservation.engine] -= reservation.tokens
         return reservation.engine
 
-    def _kv_tokens_needed(self, request: LLMRequest) -> int:
-        last = self._last_turns.get(request.request_id)
-        output = last.output_tokens if last else self.default_osl
-        return prefill_tokens(request.body) + output
-
     def _fits(self, ep: Endpoint, need: int, request_id: str) -> bool:
+        admissible = self._max_admissible_kv_tokens(ep, request_id)
+        return self._kv_token_budget(ep) > 0 and need <= admissible
+
+    def _max_admissible_kv_tokens(self, ep: Endpoint, request_id: str | None) -> int:
+        """The largest request ep can take now, not counting request_id's own reservation there."""
         budget = self._kv_token_budget(ep)
+        if budget <= 0:
+            return 0
         # A request routed again must not compete with its own old reservation.
-        reservation = self._reservations.get(request_id)
+        reservation = self._reservations.get(request_id) if request_id else None
         own = reservation.tokens if reservation and reservation.engine == ep.name else 0
         reserved = self._reserved_by_engine.get(ep.name, 0) - own
         # An oversize request reserves the whole budget, so it waits for an idle engine.
-        return budget > 0 and reserved + min(need, budget) <= budget
+        return budget - reserved if reserved else sys.maxsize
 
     def _kv_token_budget(self, ep: Endpoint) -> int:
-        return int(_capacity(ep) * self.budget_fraction)
+        return int(_kv_token_capacity(ep) * self.budget_fraction)
 
 
-def _capacity(ep: Endpoint) -> int:
+def _kv_token_capacity(ep: Endpoint) -> int:
     value = ep.attributes.get("kv_cache_size")
     return int(value) if isinstance(value, (int, float)) else 0
 
@@ -130,4 +153,9 @@ def _capacity(ep: Endpoint) -> int:
 def _reports_no_capacity(ep: Endpoint) -> bool:
     # Engines not yet polled have empty stats and are simply waited for.
     stats = ep.attributes.get("routing_stats")
-    return isinstance(stats, dict) and bool(stats) and not stats.get("error") and _capacity(ep) <= 0
+    return (
+        isinstance(stats, dict)
+        and bool(stats)
+        and not stats.get("error")
+        and _kv_token_capacity(ep) <= 0
+    )
