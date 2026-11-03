@@ -57,7 +57,7 @@ class FlowControlPlugin(Protocol):
         ...
 
     def kv_tokens_needed(self, request: LLMRequest) -> int:
-        """The request's size, in the units max_admissible_kv_tokens() reports."""
+        """The KV tokens the request needs."""
         ...
 
     def max_admissible_kv_tokens(self, endpoint: Endpoint) -> int:
