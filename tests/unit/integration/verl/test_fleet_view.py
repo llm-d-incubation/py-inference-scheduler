@@ -72,10 +72,10 @@ async def test_decisions_share_a_snapshot_request_only_while_it_is_in_flight():
 async def test_the_view_adds_only_the_sends_a_snapshot_missed():
     fleet = _fleet()
     view = FleetView(fleet)
-    view.count_sends("e1", 1)
+    view.add_send("e1")
     fetching = asyncio.ensure_future(view.fetch_snapshot())
     await asyncio.sleep(0)
-    view.count_sends("e1", 1)
+    view.add_send("e1")
 
     # The fleet counted the first send before the snapshot, but not the second.
     fleet.snapshots[0].set_result(FleetSnapshot(stats={}, inflight={"e1": 5}))
