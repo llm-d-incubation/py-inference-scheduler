@@ -7,6 +7,17 @@ slime router (`python -m integration.slime`) unchanged**. To learn how it works,
 > Leave `--use-miles-router` **unset** so miles' engines self-register with our router instead of
 > miles' own `MilesRouter`.
 
+## Compatibility Notice
+
+> [!WARNING]
+> **miles temporarily removed external-router mode on 2026-09-04**
+> ([radixark/miles#1996](https://github.com/radixark/miles/pull/1996), commit `43fc74fa0`):
+> `miles/ray/rollout/rollout_server.py` now rejects `--sglang-router-ip`, noting the mode is
+> "expected to return with the k8s-native mode" ([#1837](https://github.com/radixark/miles/issues/1837)).
+> Until it returns, this recipe only works on miles checkouts and images **older than that commit**.
+> miles publishes no releases; the commit this integration was validated against is `713d99d`
+> (`radixark/miles`, 2026-06-22).
+
 ---
 
 ## Prerequisites (Step 1)
