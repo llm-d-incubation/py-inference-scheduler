@@ -12,12 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from __future__ import annotations
-
 import os
-import textwrap
+from pathlib import Path
 
 import pytest
+import yaml
 
 from py_inference_scheduler import Scheduler, SchedulerConfig
 from py_inference_scheduler.framework import Endpoint, LLMRequest, SchedulerProfile, WeightedScorer
@@ -127,33 +126,25 @@ def test_filter_scorer_picker_combined():
     assert [scored.endpoint.name for scored in pr.ranked] == ["pod1", "pod3"]
 
 
-WITH_FLOW_CONTROL = textwrap.dedent(
-    """
-    profile_handler:
-      type: single_profile
-    profiles:
-      default:
-        flow_control:
-          type: kv_saturation
-        scorers:
-          - type: least_queue
-            weight: 1.0
-        picker:
-          type: max_score
-    """
-)
+def _write_config(path: Path, *, flow_control: bool) -> None:
+    profile: dict[str, object] = {
+        "scorers": [{"type": "least_queue", "weight": 1.0}],
+        "picker": {"type": "max_score"},
+    }
+    if flow_control:
+        profile["flow_control"] = {"type": "kv_saturation"}
+    config = {"profile_handler": {"type": "single_profile"}, "profiles": {"default": profile}}
+    path.write_text(yaml.safe_dump(config), encoding="utf-8")
 
 
 def test_sees_flow_control_before_any_decision_and_leaves_reloads_to_schedule(tmp_path):
     config_file = tmp_path / "scheduler.yaml"
-    config_file.write_text(WITH_FLOW_CONTROL, encoding="utf-8")
+    _write_config(config_file, flow_control=True)
     scheduler = Scheduler(config_path=str(config_file))
     assert scheduler.has_flow_control()
 
-    without = WITH_FLOW_CONTROL.replace("    flow_control:\n      type: kv_saturation\n", "")
-    config_file.write_text(without, encoding="utf-8")
+    _write_config(config_file, flow_control=False)
     os.utime(config_file, (scheduler.last_mtime + 2, scheduler.last_mtime + 2))
-
     assert scheduler.has_flow_control()
 
 
@@ -170,24 +161,15 @@ class LearningScorer:
         self.learned.append(endpoint.name)
 
 
-def _learning_scheduler() -> tuple[Scheduler, LearningScorer]:
+def test_scorers_learn_the_pick_or_only_the_endpoint_recorded_later():
     scorer = LearningScorer()
     profile = SchedulerProfile(name="default").with_scorers(WeightedScorer(scorer, 1.0))
-    return make_scheduler_with_profile(profile), scorer
-
-
-def test_scorers_learn_the_pick_by_default():
-    scheduler, scorer = _learning_scheduler()
-    scheduler.schedule(LLMRequest(request_id="r"), [Endpoint(name="pod1"), Endpoint(name="pod2")])
-
+    scheduler = make_scheduler_with_profile(profile)
+    request, pods = LLMRequest(request_id="r"), [Endpoint(name="pod1"), Endpoint(name="pod2")]
+    scheduler.schedule(request, pods)
     assert scorer.learned == ["pod1"]
 
-
-def test_scorers_learn_only_the_endpoint_recorded_later():
-    scheduler, scorer = _learning_scheduler()
-    request, other = LLMRequest(request_id="r"), Endpoint(name="pod2")
-    result = scheduler.schedule(request, [Endpoint(name="pod1"), other], record_placement=False)
-    assert scorer.learned == []
-
-    scheduler.record_placement(result, request, other)
-    assert scorer.learned == ["pod2"]
+    result = scheduler.schedule(request, pods, record_placement=False)
+    assert scorer.learned == ["pod1"]
+    scheduler.record_placement(result, request, pods[1])
+    assert scorer.learned == ["pod1", "pod2"]
