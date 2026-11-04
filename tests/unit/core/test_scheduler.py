@@ -15,9 +15,10 @@
 from __future__ import annotations
 
 import os
-import textwrap
+from pathlib import Path
 
 import pytest
+import yaml
 
 from py_inference_scheduler import Scheduler, SchedulerConfig
 from py_inference_scheduler.framework import Endpoint, LLMRequest, SchedulerProfile, WeightedScorer
@@ -127,33 +128,25 @@ def test_filter_scorer_picker_combined():
     assert [scored.endpoint.name for scored in pr.ranked] == ["pod1", "pod3"]
 
 
-WITH_FLOW_CONTROL = textwrap.dedent(
-    """
-    profile_handler:
-      type: single_profile
-    profiles:
-      default:
-        flow_control:
-          type: kv_saturation
-        scorers:
-          - type: least_queue
-            weight: 1.0
-        picker:
-          type: max_score
-    """
-)
+def _write_config(path: Path, *, flow_control: bool) -> None:
+    profile: dict[str, object] = {
+        "scorers": [{"type": "least_queue", "weight": 1.0}],
+        "picker": {"type": "max_score"},
+    }
+    if flow_control:
+        profile["flow_control"] = {"type": "kv_saturation"}
+    config = {"profile_handler": {"type": "single_profile"}, "profiles": {"default": profile}}
+    path.write_text(yaml.safe_dump(config), encoding="utf-8")
 
 
 def test_sees_flow_control_before_any_decision_and_leaves_reloads_to_schedule(tmp_path):
     config_file = tmp_path / "scheduler.yaml"
-    config_file.write_text(WITH_FLOW_CONTROL, encoding="utf-8")
+    _write_config(config_file, flow_control=True)
     scheduler = Scheduler(config_path=str(config_file))
     assert scheduler.has_flow_control()
 
-    without = WITH_FLOW_CONTROL.replace("    flow_control:\n      type: kv_saturation\n", "")
-    config_file.write_text(without, encoding="utf-8")
+    _write_config(config_file, flow_control=False)
     os.utime(config_file, (scheduler.last_mtime + 2, scheduler.last_mtime + 2))
-
     assert scheduler.has_flow_control()
 
 
