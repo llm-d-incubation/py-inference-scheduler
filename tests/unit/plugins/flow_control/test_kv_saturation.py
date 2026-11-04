@@ -30,7 +30,9 @@ def _turn(trajectory: str, prompt_tokens: int) -> LLMRequest:
     return LLMRequest(request_id=trajectory, body=list(range(prompt_tokens)))
 
 
-def _offered(plugin: KVSaturationPlugin, request: LLMRequest, engines: list[Endpoint]) -> list[str]:
+def _allowed_candidates(
+    plugin: KVSaturationPlugin, request: LLMRequest, engines: list[Endpoint]
+) -> list[str]:
     return [ep.name for ep in plugin.get_allowed_candidates(request, engines)]
 
 
@@ -55,7 +57,7 @@ def test_budget_fraction_keeps_headroom_unreserved():
     plugin.reserve(_turn("t1", 100), engine)
 
     # Half of 200 is the budget, and 100 of it is held.
-    assert _offered(plugin, _turn("t2", 1), [engine]) == []
+    assert _allowed_candidates(plugin, _turn("t2", 1), [engine]) == []
 
 
 def test_a_first_turn_needs_its_prompt_plus_default_osl():
@@ -65,7 +67,7 @@ def test_a_first_turn_needs_its_prompt_plus_default_osl():
     plugin.reserve(_turn("b", 91), short)
 
     # 90 prompt + 10 output = 100, against 100 and 99 tokens still free.
-    assert _offered(plugin, _turn("t1", 90), [fits, short]) == ["fits"]
+    assert _allowed_candidates(plugin, _turn("t1", 90), [fits, short]) == ["fits"]
 
 
 def test_waits_for_engines_without_a_successful_poll():
@@ -73,7 +75,7 @@ def test_waits_for_engines_without_a_successful_poll():
     unpolled = Endpoint(name="unpolled", attributes={"routing_stats": {}})
     failed = Endpoint(name="failed", attributes={"routing_stats": {"error": "timeout"}})
 
-    assert _offered(plugin, _turn("t1", 1), [unpolled, failed]) == []
+    assert _allowed_candidates(plugin, _turn("t1", 1), [unpolled, failed]) == []
 
 
 def test_fails_when_polled_engines_report_no_capacity():
@@ -90,10 +92,10 @@ def test_reservations_consume_the_budget_until_released():
     first, second = _turn("t1", 60), _turn("t2", 60)
 
     plugin.reserve(first, engine)
-    assert _offered(plugin, second, [engine]) == []
+    assert _allowed_candidates(plugin, second, [engine]) == []
 
     plugin.release(first, "e1")
-    assert _offered(plugin, second, [engine]) == ["e1"]
+    assert _allowed_candidates(plugin, second, [engine]) == ["e1"]
 
 
 def test_reserving_a_request_again_moves_its_reservation():
@@ -101,31 +103,31 @@ def test_reserving_a_request_again_moves_its_reservation():
     e1, e2 = _engine("e1", 100), _engine("e2", 100)
     plugin.reserve(_turn("t1", 60), e1)
 
-    assert _offered(plugin, _turn("t1", 60), [e1]) == ["e1"]
+    assert _allowed_candidates(plugin, _turn("t1", 60), [e1]) == ["e1"]
     plugin.reserve(_turn("t1", 60), e2)
 
-    assert _offered(plugin, _turn("t2", 100), [e1, e2]) == ["e1"]
+    assert _allowed_candidates(plugin, _turn("t2", 100), [e1, e2]) == ["e1"]
     plugin.release(_turn("t1", 60), "e2")
-    assert _offered(plugin, _turn("t2", 100), [e1, e2]) == ["e1", "e2"]
+    assert _allowed_candidates(plugin, _turn("t2", 100), [e1, e2]) == ["e1", "e2"]
 
 
-def test_offers_the_last_engine_alone_when_it_fits():
+def test_allows_only_the_last_engine_when_it_fits():
     plugin = KVSaturationPlugin(default_osl=0)
     engines = [_engine("e1", 100), _engine("e2", 100)]
     plugin.reserve(_turn("t1", 10), engines[1])
     plugin.release(_turn("t1", 10), "e2", output_tokens=5)
 
-    assert _offered(plugin, _turn("t1", 20), engines) == ["e2"]
+    assert _allowed_candidates(plugin, _turn("t1", 20), engines) == ["e2"]
 
 
-def test_offers_every_fitting_engine_when_the_last_engine_is_full():
+def test_allows_every_fitting_engine_when_the_last_engine_is_full():
     plugin = KVSaturationPlugin(default_osl=0)
     engines = [_engine("e1", 100), _engine("e2", 100), _engine("e3", 100)]
     plugin.reserve(_turn("t1", 10), engines[1])
     plugin.release(_turn("t1", 10), "e2", output_tokens=5)
     plugin.reserve(_turn("other", 95), engines[1])
 
-    assert _offered(plugin, _turn("t1", 20), engines) == ["e1", "e3"]
+    assert _allowed_candidates(plugin, _turn("t1", 20), engines) == ["e1", "e3"]
 
 
 def test_next_turn_assumes_the_average_output():
@@ -136,8 +138,8 @@ def test_next_turn_assumes_the_average_output():
     plugin.reserve(_turn("other", 100), engine)
 
     # other books 100 + 500 default, leaving 100: 60 prompt + 40 average output fits, 61 + 40 not.
-    assert _offered(plugin, _turn("t1", 60), [engine]) == ["e1"]
-    assert _offered(plugin, _turn("t1", 61), [engine]) == []
+    assert _allowed_candidates(plugin, _turn("t1", 60), [engine]) == ["e1"]
+    assert _allowed_candidates(plugin, _turn("t1", 61), [engine]) == []
 
 
 def test_an_oversize_request_waits_for_an_idle_engine_and_fills_it():
@@ -146,12 +148,12 @@ def test_an_oversize_request_waits_for_an_idle_engine_and_fills_it():
     big, small = _turn("big", 150), _turn("small", 1)
 
     plugin.reserve(small, engine)
-    assert _offered(plugin, big, [engine]) == []
+    assert _allowed_candidates(plugin, big, [engine]) == []
     plugin.release(small, "e1")
-    assert _offered(plugin, big, [engine]) == ["e1"]
+    assert _allowed_candidates(plugin, big, [engine]) == ["e1"]
 
     plugin.reserve(big, engine)
-    assert _offered(plugin, small, [engine]) == []
+    assert _allowed_candidates(plugin, small, [engine]) == []
 
 
 def test_forgets_the_oldest_trajectories(monkeypatch: pytest.MonkeyPatch):
@@ -162,14 +164,14 @@ def test_forgets_the_oldest_trajectories(monkeypatch: pytest.MonkeyPatch):
         plugin.reserve(_turn(trajectory, 10), engines[1])
         plugin.release(_turn(trajectory, 10), "e2", output_tokens=5)
 
-    assert _offered(plugin, _turn("t1", 10), engines) == ["e1", "e2"]
-    assert _offered(plugin, _turn("t2", 10), engines) == ["e2"]
+    assert _allowed_candidates(plugin, _turn("t1", 10), engines) == ["e1", "e2"]
+    assert _allowed_candidates(plugin, _turn("t2", 10), engines) == ["e2"]
 
 
 def test_releasing_an_unknown_request_changes_nothing():
     plugin = KVSaturationPlugin(default_osl=0)
     plugin.release(_turn("never-reserved", 10), "e1")
-    assert _offered(plugin, _turn("t1", 100), [_engine("e1", 100)]) == ["e1"]
+    assert _allowed_candidates(plugin, _turn("t1", 100), [_engine("e1", 100)]) == ["e1"]
 
 
 def test_max_admissible_kv_tokens_is_the_budget_minus_reservations():
@@ -194,4 +196,4 @@ def test_the_size_check_agrees_with_the_offer(held: int, prompt: int):
     # A queue may skip a request by size alone only when the full check turns it away too.
     request = _turn("t1", prompt)
     fits_by_size = plugin.kv_tokens_needed(request) <= plugin.max_admissible_kv_tokens(engine)
-    assert fits_by_size == (_offered(plugin, request, [engine]) == ["e1"])
+    assert fits_by_size == (_allowed_candidates(plugin, request, [engine]) == ["e1"])
