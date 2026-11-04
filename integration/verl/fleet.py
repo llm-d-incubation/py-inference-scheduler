@@ -305,8 +305,11 @@ class FleetView:
             ep.attributes["queue_len"] = snapshot.inflight.get(ep.name, 0) + unseen
         return endpoints
 
-    def count_sends(self, name: str, delta: int) -> None:
-        self._local[name] = self._local.get(name, 0) + delta
+    def add_send(self, name: str) -> None:
+        self._local[name] = self._local.get(name, 0) + 1
+
+    def remove_send(self, name: str) -> None:
+        self._local[name] = self._local.get(name, 0) - 1
 
     async def request_admission(
         self, request: LLMRequest, ranking: list[str], worker_id: str, ticket: str
@@ -318,9 +321,9 @@ class FleetView:
         """
         guess = ranking[0] if ranking else None
         if guess:
-            self.count_sends(guess, 1)
+            self.add_send(guess)
         try:
             return await request_admission(self._fleet, request, ranking, worker_id, ticket)
         finally:
             if guess:
-                self.count_sends(guess, -1)
+                self.remove_send(guess)

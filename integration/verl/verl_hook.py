@@ -147,7 +147,7 @@ class _SchedulerCore:
                 raise
             finally:
                 self.waiting.pop(ticket, None)
-            self.view.count_sends(name, 1)
+            self.view.add_send(name)
             admitted = next(ep for ep in self.endpoints if ep.name == name)
             # The fleet can admit the request to an engine other than the top-ranked one, so the
             # scorers learn the engine it actually went to.
@@ -164,13 +164,13 @@ class _SchedulerCore:
             return winner
 
     def record_dispatch(self, endpoint_name: str) -> None:
-        self.view.count_sends(endpoint_name, 1)
+        self.view.add_send(endpoint_name)
         self.fleet.increment.remote(endpoint_name)
 
     def record_release(
         self, endpoint_name: str, request_id: str, output_tokens: int | None
     ) -> None:
-        self.view.count_sends(endpoint_name, -1)
+        self.view.remove_send(endpoint_name)
         if self.admits:
             # The sync fleet runs this before the trajectory's next admit, so nothing waits on it.
             self.fleet.finish.remote(request_id, endpoint_name, output_tokens)
