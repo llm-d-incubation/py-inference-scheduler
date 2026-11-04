@@ -12,8 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from __future__ import annotations
-
 import os
 from pathlib import Path
 
@@ -163,24 +161,15 @@ class LearningScorer:
         self.learned.append(endpoint.name)
 
 
-def _learning_scheduler() -> tuple[Scheduler, LearningScorer]:
+def test_scorers_learn_the_pick_or_only_the_endpoint_recorded_later():
     scorer = LearningScorer()
     profile = SchedulerProfile(name="default").with_scorers(WeightedScorer(scorer, 1.0))
-    return make_scheduler_with_profile(profile), scorer
-
-
-def test_scorers_learn_the_pick_by_default():
-    scheduler, scorer = _learning_scheduler()
-    scheduler.schedule(LLMRequest(request_id="r"), [Endpoint(name="pod1"), Endpoint(name="pod2")])
-
+    scheduler = make_scheduler_with_profile(profile)
+    request, pods = LLMRequest(request_id="r"), [Endpoint(name="pod1"), Endpoint(name="pod2")]
+    scheduler.schedule(request, pods)
     assert scorer.learned == ["pod1"]
 
-
-def test_scorers_learn_only_the_endpoint_recorded_later():
-    scheduler, scorer = _learning_scheduler()
-    request, other = LLMRequest(request_id="r"), Endpoint(name="pod2")
-    result = scheduler.schedule(request, [Endpoint(name="pod1"), other], record_placement=False)
-    assert scorer.learned == []
-
-    scheduler.record_placement(result, request, other)
-    assert scorer.learned == ["pod2"]
+    result = scheduler.schedule(request, pods, record_placement=False)
+    assert scorer.learned == ["pod1"]
+    scheduler.record_placement(result, request, pods[1])
+    assert scorer.learned == ["pod1", "pod2"]
