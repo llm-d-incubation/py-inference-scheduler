@@ -13,7 +13,11 @@
 # limitations under the License.
 
 
+import os
+from pathlib import Path
+
 import pytest
+import yaml
 
 from py_inference_scheduler import Scheduler, SchedulerConfig
 from py_inference_scheduler.framework import Endpoint, LLMRequest, SchedulerProfile, WeightedScorer
@@ -120,3 +124,25 @@ def test_filter_scorer_picker_combined():
     chosen = pr.endpoint_list[0].endpoint
     # pod2 has the smallest queue size, but is in the wrong zone, so pod 1 should be chosen
     assert chosen.name == "pod1"
+
+
+def _write_config(path: Path, *, flow_control: bool) -> None:
+    profile: dict[str, object] = {
+        "scorers": [{"type": "least_queue", "weight": 1.0}],
+        "picker": {"type": "max_score"},
+    }
+    if flow_control:
+        profile["flow_control"] = {"type": "kv_saturation"}
+    config = {"profile_handler": {"type": "single_profile"}, "profiles": {"default": profile}}
+    path.write_text(yaml.safe_dump(config), encoding="utf-8")
+
+
+def test_sees_flow_control_before_any_decision_and_leaves_reloads_to_schedule(tmp_path):
+    config_file = tmp_path / "scheduler.yaml"
+    _write_config(config_file, flow_control=True)
+    scheduler = Scheduler(config_path=str(config_file))
+    assert scheduler.has_flow_control()
+
+    _write_config(config_file, flow_control=False)
+    os.utime(config_file, (scheduler.last_mtime + 2, scheduler.last_mtime + 2))
+    assert scheduler.has_flow_control()
