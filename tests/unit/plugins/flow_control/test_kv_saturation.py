@@ -187,7 +187,7 @@ def test_an_engine_without_capacity_has_no_room():
 
 
 @pytest.mark.parametrize(("held", "prompt"), [(0, 500), (30, 70), (30, 71), (100, 1)])
-def test_the_size_check_agrees_with_the_offer(held: int, prompt: int):
+def test_the_size_check_agrees_with_the_filter(held: int, prompt: int):
     plugin = KVSaturationPlugin(default_osl=0)
     engine = _engine("e1", 100)
     if held:
