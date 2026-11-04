@@ -36,7 +36,8 @@ from __future__ import annotations
 import asyncio
 import collections
 import time
-from typing import NamedTuple, cast
+from types import SimpleNamespace
+from typing import NamedTuple
 
 import ray
 from omegaconf import OmegaConf
@@ -66,7 +67,8 @@ class FakeServer:
     async def generate(self, **kwargs):  # noqa: ANN201
         if self.hold_s:
             await asyncio.sleep(self.hold_s)
-        return {"token_ids": [1, 2, 3], "server": self.name}
+        # Shaped like verl's TokenOutput, whose token_ids the hook counts.
+        return SimpleNamespace(token_ids=[1, 2, 3], server=self.name)
 
     def configure(self, load: Load, hold_s: float) -> None:
         self.load, self.hold_s = load, hold_s
@@ -96,12 +98,9 @@ def _reports(stats: dict[str, object], load: Load) -> bool:
 
 
 async def _turn(client, request_id: str, prompt_ids: list[int]) -> str:
-    # generate passes through the rollout server's reply: a dict from FakeServer.
-    out = cast(
-        dict,
-        await client.generate(request_id=request_id, prompt_ids=prompt_ids, sampling_params={}),
-    )
-    return str(out["server"])
+    # generate passes the fake engine's reply through, so it names the engine that served the turn.
+    out = await client.generate(request_id=request_id, prompt_ids=prompt_ids, sampling_params={})
+    return str(out.server)
 
 
 async def _prefix_sticky(client) -> bool:

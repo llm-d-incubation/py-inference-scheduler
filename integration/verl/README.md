@@ -15,7 +15,7 @@ Both expose the same entrypoint flag (`agent_loop_manager_class=integration.verl
 
 Key components:
 - [verl_hook.py](./verl_hook.py): Contains `InferenceSchedulerServerManager` and `PyInferenceAgentLoopManager` which are injected into the `verl` training loop.
-- [fleet.py](./fleet.py): one Ray actor shared by all agent-loop workers. It counts in-flight requests per engine across workers, discovers the engines once, and polls their metrics in the background.
+- [fleet.py](./fleet.py): one Ray actor shared by all agent-loop workers. It counts in-flight requests per engine across workers, discovers the engines once, and polls their metrics in the background. A profile with flow control gets an `AdmissionFleet` instead, the same actor plus one queue for every worker: it admits each request through [admission.py](./admission.py) to the highest-ranked engine with room, by the ranking its worker sent, or queues it and calls the worker back once an engine has room.
 - `backends/verl/`: Contains monkey-patches for `vllm` and `sglang` to expose engine metrics to the hook.
 - `datalayer/metrics/verl/`: Contains backend-specific logic (HTTP scraping) to fetch and parse metrics from the workers.
 
