@@ -22,12 +22,11 @@ from collections.abc import Awaitable, Callable, Sequence
 
 import aiohttp
 
-from py_inference_scheduler.datalayer.metrics.datastore import InflightStore
 from py_inference_scheduler.framework import Endpoint
 
 logger = logging.getLogger(__name__)
 
-FetchMetrics = Callable[[Endpoint, InflightStore, aiohttp.ClientSession], Awaitable[None]]
+FetchMetrics = Callable[[Endpoint, aiohttp.ClientSession], Awaitable[None]]
 
 _LOG_CADENCE = 300
 
@@ -46,12 +45,10 @@ class MetricsPoller:
     def __init__(
         self,
         list_endpoints: Callable[[], Sequence[Endpoint]],
-        inflight: InflightStore,
         fetch_metrics: FetchMetrics,
         interval_ms: int = 100,
     ) -> None:
         self._list_endpoints = list_endpoints
-        self._inflight = inflight
         self._fetch = fetch_metrics
         self._interval = interval_ms / 1000.0
         self._last_refresh = 0.0
@@ -81,7 +78,7 @@ class MetricsPoller:
                 if endpoints:
                     results = loop.run_until_complete(
                         asyncio.gather(
-                            *[self._fetch(ep, self._inflight, session) for ep in endpoints],
+                            *[self._fetch(ep, session) for ep in endpoints],
                             return_exceptions=True,
                         )
                     )
