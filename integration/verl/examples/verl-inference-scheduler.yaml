@@ -31,7 +31,7 @@ spec:
         - name: ray-head
           image: <REGION>-docker.pkg.dev/<PROJECT>/ray-images/verl-swe:<VERL_COMMIT>-v1
           imagePullPolicy: IfNotPresent
-          # Optional, but reccommended; WANDB has a great UI
+          # Optional, but recommended; WANDB has a great UI
           # env:
           # - name: WANDB_API_KEY
           #   valueFrom:
