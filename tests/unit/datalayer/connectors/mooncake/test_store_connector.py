@@ -40,6 +40,7 @@ from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec
 from vllm.v1.outputs import KVConnectorOutput
 
 from py_inference_scheduler.datalayer.connectors.mooncake.store_connector import (
+    SAVE_RETRIES,
     MooncakeStoreConnector,
 )
 
@@ -55,18 +56,28 @@ TRANSFER_FAIL = -800
 
 
 class FakeMooncakeStore:
-    """Stands in for MooncakeDistributedStore: no key exists yet, every put gets `put_status`."""
+    """Stands in for MooncakeDistributedStore.
 
-    def __init__(self, put_status: int) -> None:
-        self.put_status = put_status
-        self.put_keys: list[str] = []
+    Put batch n gives every key status n of `batch_results` (the last one repeats);
+    an exception there is raised instead.
+    """
+
+    def __init__(self, *batch_results: int | Exception) -> None:
+        self.batch_results = batch_results
+        self.put_batches: list[list[str]] = []
+        self.stored: set[str] = set()
 
     def batch_is_exist(self, keys):
-        return [0] * len(keys)
+        return [int(key in self.stored) for key in keys]
 
     def batch_put_from_multi_buffers(self, keys, addrs, sizes, replicate_config):
-        self.put_keys.extend(keys)
-        return [self.put_status] * len(keys)
+        result = self.batch_results[min(len(self.put_batches), len(self.batch_results) - 1)]
+        self.put_batches.append(list(keys))
+        if isinstance(result, Exception):
+            raise result
+        if result >= 0:
+            self.stored.update(keys)
+        return [result] * len(keys)
 
 
 def _scheduler_connector(pool: BlockPool) -> MooncakeStoreConnector:
@@ -117,86 +128,164 @@ def _worker_connector(store: FakeMooncakeStore) -> MooncakeStoreConnector:
         ready_event=threading.Event(),
     )
     worker = object.__new__(MooncakeStoreWorker)
-    worker.kv_send_thread = send_thread
+    worker.kv_send_thread = None
+    # The real register_kv_caches needs a live store; of what it does, only creating the
+    # send thread matters here.
+    worker.register_kv_caches = lambda kv_caches: setattr(worker, "kv_send_thread", send_thread)
 
     conn = object.__new__(MooncakeStoreConnector)
     conn.connector_worker = worker
+    conn.register_kv_caches({})
     return conn
 
 
-def _prefill_step(block_ids: list[int]) -> SimpleNamespace:
-    """Scheduler output for the step that prefills the turn's whole prompt."""
-    new_req = SimpleNamespace(
-        req_id=REQ_ID,
-        num_computed_tokens=0,
-        prompt_token_ids=list(range(PROMPT_LEN)),
-        prefill_token_ids=None,
-        block_ids=(block_ids,),
+def _prefill_step(block_ids: list[int], num_computed: int, num_new: int) -> SimpleNamespace:
+    """Scheduler output for a step that prefills `num_new` more prompt tokens."""
+    cached_reqs = SimpleNamespace(
+        req_ids=[], new_block_ids=[], num_computed_tokens=[], resumed_req_ids=set()
     )
+    new_reqs = []
+    if num_computed == 0:
+        new_reqs.append(
+            SimpleNamespace(
+                req_id=REQ_ID,
+                num_computed_tokens=0,
+                prompt_token_ids=list(range(PROMPT_LEN)),
+                prefill_token_ids=None,
+                block_ids=(block_ids,),
+            )
+        )
+    else:
+        cached_reqs.req_ids = [REQ_ID]
+        cached_reqs.new_block_ids = [None]
+        cached_reqs.num_computed_tokens = [num_computed]
     return SimpleNamespace(
         finished_req_ids=set(),
         preempted_req_ids=set(),
-        scheduled_new_reqs=[new_req],
-        scheduled_cached_reqs=SimpleNamespace(
-            req_ids=[], new_block_ids=[], num_computed_tokens=[], resumed_req_ids=set()
-        ),
-        num_scheduled_tokens={REQ_ID: PROMPT_LEN},
-        total_num_scheduled_tokens=PROMPT_LEN,
+        scheduled_new_reqs=new_reqs,
+        scheduled_cached_reqs=cached_reqs,
+        num_scheduled_tokens={REQ_ID: num_new},
+        total_num_scheduled_tokens=num_new,
         kv_connector_block_state=KVConnectorBlockState(
             block_ids={REQ_ID: (block_ids,)}, boundary_state_offloads={}
         ),
     )
 
 
-def _run_turn(put_status: int) -> tuple[list[int], FakeMooncakeStore]:
-    """Save one finished turn's prompt KV and return its blocks' ref counts.
+def _start_turn(store: FakeMooncakeStore, chunks: tuple[int, ...] = (PROMPT_LEN,)):
+    """Prefill one turn's prompt in `chunks`, queue each step's store job, then end the turn.
 
-    Order of events: the prefill step emits the store job, the turn finishes and
-    vLLM frees the request's own block references, then the worker runs the put
-    and reports the job done on a later step.
+    On vLLM 0.29 request_finished never delays the free, so once the turn ends the
+    store jobs' references are all that keep its blocks out of the free queue.
     """
     pool = BlockPool(num_gpu_blocks=8, enable_caching=True, hash_block_size=BLOCK_SIZE)
     blocks = pool.get_new_blocks(2)  # the request's own reference
-    block_ids = [b.block_id for b in blocks]
-    sched_conn = _scheduler_connector(pool)
-    store = FakeMooncakeStore(put_status)
-    worker_conn = _worker_connector(store)
+    turn = SimpleNamespace(
+        pool=pool,
+        block_ids=[b.block_id for b in blocks],
+        sched_conn=_scheduler_connector(pool),
+        worker_conn=_worker_connector(store),
+    )
+    turn.send_thread = turn.worker_conn.connector_worker.kv_send_thread
 
     request = SimpleNamespace(
         request_id=REQ_ID,
         all_token_ids=list(range(PROMPT_LEN)),
         block_hashes=[b"h0", b"h1"],
     )
-    sched_conn.connector_scheduler.update_state_after_alloc(request, None, num_external_tokens=0)
-    meta = sched_conn.build_connector_meta(_prefill_step(block_ids))
-    (save,) = [m for m in meta.requests if m.can_save]
-
-    # The turn ends: on vLLM 0.29 request_finished never delays the free, so the
-    # store job's reference is all that keeps these blocks out of the free queue.
-    pool.free_blocks(blocks)
-
-    send_thread = worker_conn.connector_worker.kv_send_thread
-    send_thread.add_request(save)
-    send_thread._handle_request(send_thread.request_queue.get())
-    sched_conn.update_connector_output(
-        KVConnectorOutput(kv_connector_worker_meta=worker_conn.build_connector_worker_meta())
+    turn.sched_conn.connector_scheduler.update_state_after_alloc(
+        request, None, num_external_tokens=0
     )
-    return [pool.blocks[i].ref_cnt for i in block_ids], store
+    num_computed = 0
+    for num_new in chunks:
+        meta = turn.sched_conn.build_connector_meta(
+            _prefill_step(turn.block_ids, num_computed, num_new)
+        )
+        for req_meta in meta.requests:
+            if req_meta.can_save:
+                turn.send_thread.add_request(req_meta)  # as wait_for_save does
+        num_computed += num_new
+
+    pool.free_blocks(blocks)  # the turn ends
+    return turn
+
+
+def _run_store_jobs(turn, max_jobs: int = 10) -> list[int]:
+    """Run up to `max_jobs` queued store jobs, then report to the scheduler as a step would.
+
+    Returns the ref counts of the turn's blocks.
+    """
+    queue = turn.send_thread.request_queue
+    for _ in range(max_jobs):
+        if queue.empty():
+            break
+        turn.send_thread._handle_request(queue.get())
+    turn.sched_conn.update_connector_output(
+        KVConnectorOutput(kv_connector_worker_meta=turn.worker_conn.build_connector_worker_meta())
+    )
+    return [turn.pool.blocks[i].ref_cnt for i in turn.block_ids]
 
 
 def test_saved_turn_releases_its_blocks():
-    ref_cnts, store = _run_turn(PUT_OK)
+    store = FakeMooncakeStore(PUT_OK)
+    turn = _start_turn(store)
 
-    assert len(store.put_keys) == 2
     # The store holds the KV, so HBM may evict these blocks.
-    assert ref_cnts == [0, 0]
+    assert _run_store_jobs(turn) == [0, 0]
+    assert len(store.put_batches) == 1
+    assert len(store.stored) == 2
 
 
 def test_failed_put_keeps_turn_blocks_referenced():
     """#58: a put that fails must not hand the turn's only KV copy to the allocator."""
-    ref_cnts, store = _run_turn(TRANSFER_FAIL)
+    store = FakeMooncakeStore(TRANSFER_FAIL)
+    turn = _start_turn(store)
 
-    assert len(store.put_keys) == 2
     # Both puts failed, so the store has nothing for this turn. If HBM evicts
     # these blocks, the next turn recomputes the whole prompt.
-    assert ref_cnts == [1, 1]
+    assert _run_store_jobs(turn, max_jobs=1) == [1, 1]
+    assert not store.stored
+
+
+def test_failed_put_is_retried_until_it_lands():
+    store = FakeMooncakeStore(TRANSFER_FAIL, PUT_OK)
+    turn = _start_turn(store)
+
+    assert _run_store_jobs(turn) == [0, 0]
+    assert len(store.put_batches) == 2
+    assert len(store.stored) == 2
+
+
+def test_put_that_raises_is_retried():
+    store = FakeMooncakeStore(RuntimeError("transfer engine went away"), PUT_OK)
+    turn = _start_turn(store)
+
+    assert _run_store_jobs(turn) == [0, 0]
+    assert len(store.put_batches) == 2
+    assert len(store.stored) == 2
+
+
+def test_failed_job_is_left_to_a_newer_job_of_the_request():
+    # Under chunked prefill the request's next job is already queued. It resumes from
+    # the last saved offset, so it saves the failed chunk too, and it references the
+    # same blocks.
+    store = FakeMooncakeStore(TRANSFER_FAIL, PUT_OK)
+    turn = _start_turn(store, chunks=(BLOCK_SIZE, BLOCK_SIZE))
+
+    # The first chunk's put fails; from here only the newer job holds the blocks.
+    assert _run_store_jobs(turn, max_jobs=1) == [1, 1]
+    assert _run_store_jobs(turn) == [0, 0]
+    assert len(store.put_batches) == 2
+    assert len(store.stored) == 2
+
+
+def test_retries_stop_and_release_the_blocks():
+    # A pin that never drops starves HBM, and has_pending_push_work keeps the engine
+    # stepping while any pin is held.
+    store = FakeMooncakeStore(TRANSFER_FAIL)
+    turn = _start_turn(store)
+
+    assert _run_store_jobs(turn) == [0, 0]
+    assert turn.send_thread.request_queue.empty()
+    assert len(store.put_batches) == 1 + SAVE_RETRIES
+    assert not store.stored
