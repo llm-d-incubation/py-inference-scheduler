@@ -60,7 +60,7 @@ except ImportError:  # modern layout (verl v0.9.x)
 
 from backends.verl.sglang import SglangEnginePatch
 from backends.verl.vllm import VllmEnginePatch
-from integration.verl.fleet import FleetSnapshot, fleet_actor
+from integration.verl.fleet import FleetSnapshot, fleet_actor, request_admission
 from py_inference_scheduler import Scheduler
 from py_inference_scheduler.framework import Endpoint, LLMRequest
 
@@ -86,16 +86,31 @@ def _rollout_config(config: DictConfig):
 class _SchedulerCore:
     """Per-worker routing on state shared by the whole fleet.
 
-    - Reads engine metrics and fleet-wide in-flight counts from the fleet actor once per decision.
-    - Holds a lock so a decision and the dispatch it counts never interleave with another.
+    - Without flow control, routes on one fleet snapshot per decision, under a lock.
+    - With flow control, asks the AdmissionFleet, which admits requests or queues them for every
+      worker and calls the worker back when a queued one is admitted.
     """
+
+    # The worker's own core, which the fleet's callback reaches through the worker actor.
+    current: _SchedulerCore | None = None
 
     def __init__(self) -> None:
         self.scheduler = Scheduler()
-        self.fleet = fleet_actor()
+        self.fleet = fleet_actor(admits=self.scheduler.has_flow_control())
+        # The manager created the fleet before any worker, so the fleet's kind decides the mode,
+        # even if the profile changed after the manager read it.
+        self.admits = hasattr(self.fleet, "admit")
         self.endpoints: list[Endpoint] = []
         self.lb_acquired_requests: set[str] = set()
         self.lock = asyncio.Lock()
+        self.waiting: dict[str, asyncio.Future[str]] = {}
+        self.worker_id = uuid.uuid4().hex
+        _SchedulerCore.current = self
+        if self.admits:
+            # Sent before this worker's first admit, so the fleet knows where to call back.
+            self.fleet.register_worker.remote(
+                self.worker_id, ray.get_runtime_context().current_actor
+            )
 
     def set_endpoints(self, handles: dict[str, ray.actor.ActorHandle]) -> None:
         self.endpoints = [
@@ -104,7 +119,27 @@ class _SchedulerCore:
         ]
 
     async def schedule(self, request_id: str, prompt_ids: list[int] | None) -> Endpoint | None:
-        """Pick an endpoint on the latest fleet snapshot. None means fall back to verl's LB."""
+        """Pick an endpoint. None means fall back to verl's LB."""
+        request = LLMRequest(
+            request_id=request_id, body=prompt_ids, headers={SESSION_HEADER: request_id}
+        )
+        if self.admits:
+            ticket = uuid.uuid4().hex
+            queued: asyncio.Future[str] = asyncio.get_running_loop().create_future()
+            self.waiting[ticket] = queued
+            try:
+                name = await request_admission(self.fleet, request, self.worker_id, ticket)
+                if name is None:
+                    name = await queued
+            except asyncio.CancelledError:
+                if queued.done() and not queued.cancelled() and queued.exception() is None:
+                    self.fleet.finish.remote(request_id, queued.result(), None)
+                else:
+                    self.fleet.cancel.remote(ticket)
+                raise
+            finally:
+                self.waiting.pop(ticket, None)
+            return next(ep for ep in self.endpoints if ep.name == name)
         async with self.lock:
             # Ray runs one caller's actor calls in order, so this worker's last
             # dispatch is already counted in the snapshot.
@@ -113,9 +148,6 @@ class _SchedulerCore:
             for ep in endpoints:
                 ep.attributes["routing_stats"] = snapshot.stats.get(ep.name, {})
                 ep.attributes["queue_len"] = snapshot.inflight.get(ep.name, 0)
-            request = LLMRequest(
-                request_id=request_id, body=prompt_ids, headers={SESSION_HEADER: request_id}
-            )
             selected = self.scheduler.run(request, candidates=endpoints)
             if not selected:
                 return None
@@ -126,8 +158,40 @@ class _SchedulerCore:
     def record_dispatch(self, endpoint_name: str) -> None:
         self.fleet.increment.remote(endpoint_name)
 
-    def record_release(self, endpoint_name: str) -> None:
-        self.fleet.decrement.remote(endpoint_name)
+    def record_release(
+        self, endpoint_name: str, request_id: str, output_tokens: int | None
+    ) -> None:
+        if self.admits:
+            # The sync fleet runs this before the trajectory's next admit, so nothing waits on it.
+            self.fleet.finish.remote(request_id, endpoint_name, output_tokens)
+        else:
+            self.fleet.decrement.remote(endpoint_name)
+
+    def receive_admission(
+        self, ticket: str, request_id: str, name: str | None, error: str | None
+    ) -> None:
+        """The fleet admitted this worker's queued request, or could not."""
+        queued = self.waiting.get(ticket)
+        if queued is None or queued.done():
+            if name is not None:
+                # verl cancelled this queued request, so free the engine the fleet admitted it to.
+                self.fleet.finish.remote(request_id, name, None)
+            return
+        if name is not None:
+            queued.set_result(name)
+        else:
+            queued.set_exception(RuntimeError(error))
+
+
+class _AdmissionCallback:
+    """Gives the worker class of either verl layout the method the fleet calls back."""
+
+    def rls_admitted(
+        self, ticket: str, request_id: str, name: str | None, error: str | None
+    ) -> None:
+        """The fleet's callback for a request this worker queued."""
+        if _SchedulerCore.current is not None:
+            _SchedulerCore.current.receive_admission(ticket, request_id, name, error)
 
 
 if _VERL_LAYOUT == "legacy":
@@ -165,9 +229,11 @@ if _VERL_LAYOUT == "legacy":
                 return server_id, handle
             return winner.name, winner.attributes["replica_obj"]
 
-        def _release_server(self, server_id: str, request_id: str | None = None) -> None:
-            self.core.record_release(server_id)
-            if request_id and request_id in self.core.lb_acquired_requests:
+        def _release_server(
+            self, server_id: str, request_id: str = "", output_tokens: int | None = None
+        ) -> None:
+            self.core.record_release(server_id, request_id, output_tokens)
+            if request_id in self.core.lb_acquired_requests:
                 super()._release_server(server_id)
                 self.core.lb_acquired_requests.remove(request_id)
 
@@ -193,18 +259,21 @@ if _VERL_LAYOUT == "legacy":
             elif hasattr(sampling_params, "ignore_eos"):
                 sampling_params.ignore_eos = ignore_eos
 
+            output_tokens = None
             try:
-                return await server.generate.remote(
+                output = await server.generate.remote(
                     request_id=uuid.uuid4().hex,
                     prompt_ids=prompt_ids,
                     sampling_params=sampling_params,
                     image_data=image_data,
                     video_data=video_data,
                 )
+                output_tokens = len(output.token_ids)
+                return output
             finally:
-                self._release_server(server_id, request_id)
+                self._release_server(server_id, request_id, output_tokens)
 
-    class PyInferenceAgentLoopWorker(AgentLoopWorker):  # type: ignore[misc]
+    class PyInferenceAgentLoopWorker(_AdmissionCallback, AgentLoopWorker):  # type: ignore[misc]
         """Inject the custom ServerManager before calling super().__init__."""
 
         def __init__(
@@ -264,9 +333,11 @@ else:  # modern layout
                 return server_id, handle
             return winner.name, winner.attributes["replica_obj"]
 
-        def _release_server(self, server_id: str, request_id: str | None = None) -> None:
-            self.core.record_release(server_id)
-            if request_id and request_id in self.core.lb_acquired_requests:
+        def _release_server(
+            self, server_id: str, request_id: str = "", output_tokens: int | None = None
+        ) -> None:
+            self.core.record_release(server_id, request_id, output_tokens)
+            if request_id in self.core.lb_acquired_requests:
                 super()._release_server(server_id)
                 self.core.lb_acquired_requests.remove(request_id)
 
@@ -294,8 +365,9 @@ else:  # modern layout
                 multimodal_kwargs["audio_data"] = audio_data
             if mm_processor_kwargs:
                 multimodal_kwargs["mm_processor_kwargs"] = mm_processor_kwargs
+            output_tokens = None
             try:
-                return await server.generate.remote(
+                output = await server.generate.remote(
                     request_id=uuid.uuid4().hex,  # fresh id per turn, mirrors upstream
                     prompt_ids=prompt_ids,
                     sampling_params=sampling_params,
@@ -304,10 +376,12 @@ else:  # modern layout
                     **multimodal_kwargs,
                     **kwargs,
                 )
+                output_tokens = len(output.token_ids)
+                return output
             finally:
-                self._release_server(server_id, request_id)
+                self._release_server(server_id, request_id, output_tokens)
 
-    class PyInferenceAgentLoopWorker(AgentLoopWorker):  # type: ignore[misc,no-redef]
+    class PyInferenceAgentLoopWorker(_AdmissionCallback, AgentLoopWorker):  # type: ignore[misc,no-redef]
         """Swap the incoming LLMServerClient for the scheduler-backed client."""
 
         def __init__(
@@ -333,6 +407,6 @@ class PyInferenceAgentLoopManager(AgentLoopManager):
 
     def __init__(self, *args: object, **kwargs: object) -> None:
         # Ray ties an actor's life to its creator: created here, the fleet outlives any one worker.
-        self._rls_fleet = fleet_actor()
+        self._rls_fleet = fleet_actor(admits=Scheduler().has_flow_control())
         self.agent_loop_workers_class = ray.remote(PyInferenceAgentLoopWorker)
         super().__init__(*args, **kwargs)

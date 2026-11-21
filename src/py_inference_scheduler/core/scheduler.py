@@ -69,6 +69,10 @@ class Scheduler:
 
     def get_flow_control_plugins(self) -> list[FlowControlPlugin]:
         """Returns all flow control plugins from all profiles."""
+        if not hasattr(self, "profiles"):
+            # The first read normally happens in schedule(), but callers like the verl hook ask
+            # before the first decision. Later reloads stay in schedule().
+            self._maybe_reload_config()
         all_plugins = []
         if hasattr(self, "profiles") and self.profiles:
             for profile in self.profiles.values():

@@ -37,5 +37,8 @@ async def fetch_worker_metrics(ep: Endpoint, inflight_store: InflightStore) -> N
             "kv": stats.get("kv", 0.0),
             "error": stats.get("error", None),
         }
+        # Capacity is fixed for an engine's life, so a failed scrape keeps the last value.
+        if stats.get("kv_cache_size"):
+            ep.attributes["kv_cache_size"] = stats["kv_cache_size"]
     except Exception:
         logger.exception("Failed to scrape RPC metrics for %s", ep.name)
