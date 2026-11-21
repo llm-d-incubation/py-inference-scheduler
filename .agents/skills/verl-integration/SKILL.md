@@ -30,12 +30,13 @@ To debug effectively without making assumptions, you must understand how the int
 
 ### 2.1 Control Flow (Scheduling & Routing)
 1.  **Entry Point**: verl loads `PyInferenceAgentLoopManager` ([verl_hook.py](../../../integration/verl/verl_hook.py)), which overrides the worker actor class with `PyInferenceAgentLoopWorker`.
-2.  **Fleet**: The manager creates one named `Fleet` actor ([fleet.py](../../../integration/verl/fleet.py)) shared by every worker. It discovers the engines from verl's balancer once, polls their metrics in the background, and counts in-flight requests per engine across workers.
+2.  **Fleet**: The manager creates one named `Fleet` actor ([fleet.py](../../../integration/verl/fleet.py)) shared by every worker. It discovers the engines from verl's balancer once, polls their metrics in the background, and counts in-flight requests per engine across workers. With flow control in the profile, the manager creates an `AdmissionFleet` instead, a subclass that also admits every request and keeps one queue for the whole job.
 3.  **Scheduling Loop**: When verl requests a generation:
     *   `_acquire_server()` takes the worker's lock and reads one fleet snapshot: engine metrics plus fleet-wide in-flight counts.
     *   It queries the `Scheduler` to select the best engine.
     *   It counts the dispatch in the fleet and returns the engine's Ray handle to verl.
-4.  **Release**: Once generation completes, `_release_server()` decrements the engine's count in the fleet.
+    *   With flow control, `_acquire_server()` ranks the engines the same way, then calls the fleet's `admit()` with that ranking. The fleet reserves the request's tokens on the highest-ranked engine with room, and the worker then tells its scorers which engine that was, since it can differ from the top-ranked one. If no engine has room, the fleet queues the request and later calls the worker's `rls_admitted()` with the engine it admitted the request to. The fleet is a sync actor, so it runs each worker's calls in order and a turn's finish always lands before the trajectory's next admit.
+4.  **Release**: Once generation completes, `_release_server()` decrements the engine's count in the fleet. With flow control it sends `finish` with the turn's output length instead, which frees the reservation and retries the queued requests on that engine.
 
 ### 2.2 Data Flow (Metrics Collection)
 *   **Step 1 (Exposure)**: vLLM/SGLang engines expose Prometheus metrics locally on the worker node (e.g., `http://localhost:8000/metrics`).
