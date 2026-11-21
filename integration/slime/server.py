@@ -132,7 +132,10 @@ async def schedule_and_proxy(  # noqa: PLR0913
 
     async with scheduling_lock:
         if fetch_metrics is not None:
-            await asyncio.gather(*[fetch_metrics(ep, inflight, session) for ep in endpoints])
+            await asyncio.gather(*[fetch_metrics(ep, session) for ep in endpoints])
+        # Counted here, not by the poller: decisions between two polls must see each other.
+        for ep in endpoints:
+            ep.attributes["queue_len"] = inflight.get(ep.name)
         selected = scheduler.run(llm_req, candidates=endpoints)
         if not selected:
             return JSONResponse(status_code=503, content={"error": "no worker selected"})
@@ -185,9 +188,7 @@ def create_app(scheduler: Scheduler, metrics_refresh_ms: int = 100) -> FastAPI:
     registry = WorkerRegistry()
     inflight = InflightStore()
     scheduling_lock = asyncio.Lock()
-    poller = MetricsPoller(
-        registry.endpoints, inflight, fetch_worker_metrics, interval_ms=metrics_refresh_ms
-    )
+    poller = MetricsPoller(registry.endpoints, fetch_worker_metrics, interval_ms=metrics_refresh_ms)
 
     @asynccontextmanager
     async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
