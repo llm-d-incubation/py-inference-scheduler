@@ -69,6 +69,10 @@ class Scheduler:
 
     def get_flow_control_plugins(self) -> list[FlowControlPlugin]:
         """Returns all flow control plugins from all profiles."""
+        if not hasattr(self, "profiles"):
+            # The first read normally happens in schedule(), but callers like the verl hook ask
+            # before the first decision. Later reloads stay in schedule().
+            self._maybe_reload_config()
         all_plugins = []
         if hasattr(self, "profiles") and self.profiles:
             for profile in self.profiles.values():
@@ -92,8 +96,14 @@ class Scheduler:
             self.last_mtime = mtime
 
     def schedule(
-        self, request: LLMRequest, candidates: Sequence[Endpoint]
+        self, request: LLMRequest, candidates: Sequence[Endpoint], *, record_placement: bool = True
     ) -> SchedulingResult:
+        """Run the profiles and pick an endpoint.
+
+        With record_placement=False the scorers don't learn the pick yet, for a caller that may
+        place the request elsewhere. It calls record_placement() once the request's endpoint
+        is known.
+        """
         self._maybe_reload_config()
         if not candidates:
             raise ValueError("no scheduling candidates provided")
@@ -128,6 +138,7 @@ class Scheduler:
         result = SchedulingResult(
             profile_results={k: v or ProfileRunResult() for k, v in profile_results.items()},
             primary_profile_name=primary,
+            cycle_state=cycle_state,
         )
 
         selected_eps = (
@@ -136,11 +147,21 @@ class Scheduler:
             else []
         )
         print(f"Selected endpoint {selected_eps}")
-        if selected_eps and primary is not None:
-            for w in self.profiles[primary].scorers:
-                if hasattr(w.scorer, "pre_request"):
-                    w.scorer.pre_request(cycle_state, request, selected_eps[0].endpoint)  # type: ignore[attr-defined]
+        if record_placement and selected_eps:
+            self.record_placement(result, request, selected_eps[0].endpoint)
         return result
+
+    def record_placement(
+        self, result: SchedulingResult, request: LLMRequest, endpoint: Endpoint
+    ) -> None:
+        """Tell the primary profile's scorers which endpoint the request went to."""
+        profile = self.profiles.get(result.primary_profile_name or "")
+        if profile is None:
+            return
+        state = result.cycle_state or CycleState()
+        for w in profile.scorers:
+            if hasattr(w.scorer, "pre_request"):
+                w.scorer.pre_request(state, request, endpoint)  # type: ignore[attr-defined]
 
     def run(
         self, request: LLMRequest, candidates: Sequence[Endpoint]
